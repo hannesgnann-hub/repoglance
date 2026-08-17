@@ -1,0 +1,22 @@
+[package]
+name = "repoglance"
+version = "0.1.0"
+description = "A local Git repository health and cleanup dashboard."
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+dirs = "5"
+repoglance-core = { path = "../crates/repoglance-core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
