@@ -530,7 +530,11 @@ fn historical_secret_files(
                     continue;
                 };
                 let content = String::from_utf8_lossy(content_bytes);
-                if let Some(note) = content_secret_note(&content) {
+                let file_name = Path::new(&blob.path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default();
+                if let Some(note) = content_secret_note(file_name, &content) {
                     findings.push(history_secret_path(path, &blob.path, blob.size, note));
                     seen_paths.insert(blob.path.clone());
                 }
@@ -635,16 +639,33 @@ fn sensitive_filename_note(path: &Path) -> Option<String> {
     None
 }
 
+/// Filenames whose "api key"-shaped field is documented by its vendor as a
+/// public project identifier, not a credential: Firebase enforces access via
+/// Security Rules rather than by keeping this value secret, so client apps
+/// are expected to ship (and commit) these files as-is.
+const PUBLIC_API_KEY_CONFIG_FILES: [&str; 2] = ["google-services.json", "GoogleService-Info.plist"];
+
 /// Content-based secret heuristics, shared between working-tree files and
-/// historical blob content.
-fn content_secret_note(content: &str) -> Option<String> {
-    let lower = content.to_ascii_lowercase();
+/// historical blob content. `file_name` drives a couple of targeted
+/// exceptions (see below) for text that matches a marker word but is not
+/// actually an embedded credential.
+fn content_secret_note(file_name: &str, content: &str) -> Option<String> {
     if content.contains("-----BEGIN") && content.contains("PRIVATE KEY-----") {
         return Some("Private key marker".into());
     }
     if content.contains("AKIA") {
         return Some("Possible AWS access key".into());
     }
+
+    // Markdown/docs files talk *about* configuration ("add your API_KEY to
+    // ...", "pass --apiKey \"$MY_KEY\"") far more often than they embed a
+    // real secret; the two high-precision checks above still apply to them.
+    if file_name.to_ascii_lowercase().ends_with(".md") {
+        return None;
+    }
+    let skip_api_key_marker = PUBLIC_API_KEY_CONFIG_FILES.contains(&file_name);
+
+    let lower = content.to_ascii_lowercase();
     for marker in [
         "api_key",
         "apikey",
@@ -655,12 +676,99 @@ fn content_secret_note(content: &str) -> Option<String> {
         "password=",
         "token=",
     ] {
-        if lower.contains(marker) {
-            return Some(format!("Possible secret marker: {marker}"));
+        if skip_api_key_marker && matches!(marker, "api_key" | "apikey") {
+            continue;
+        }
+
+        let mut search_from = 0;
+        while let Some(relative_pos) = lower[search_from..].find(marker) {
+            let marker_start = search_from + relative_pos;
+            let after = &content[marker_start + marker.len()..];
+            if looks_like_embedded_secret_value(marker, after) {
+                return Some(format!("Possible secret marker: {marker}"));
+            }
+            search_from = marker_start + marker.len();
         }
     }
 
     None
+}
+
+/// After a marker like `api_key` or `token=`, decides whether what follows
+/// looks like an embedded literal secret value rather than a reference to one
+/// supplied externally - an environment variable (`$API_KEY`), a CI secrets
+/// store (`${{ secrets.X }}`), a bare property/URL-fragment match with
+/// nothing assigned (`_config.apiKey`, `.../oauth/access_token?...`), a
+/// self-referential parameter (`client_secret = _client_secret`), or an
+/// obvious placeholder.
+fn looks_like_embedded_secret_value(marker: &str, after: &str) -> bool {
+    // A marker matched inside a quoted key (JSON/YAML `"api_key": "..."`)
+    // leaves the key's own closing quote as the very next character; skip at
+    // most one such quote before looking for the real value, so it isn't
+    // mistaken for the value's opening quote.
+    let after = after.strip_prefix(['"', '\'']).unwrap_or(after);
+    let after = after.trim_start_matches(|c: char| matches!(c, ' ' | '\t'));
+
+    // Markers ending in `=` (e.g. "token=") already include the assignment
+    // operator. The rest must actually be followed by `=`/`:` to be an
+    // assignment at all - otherwise the marker is just part of a URL,
+    // identifier, or function signature (`.../access_token?cb=`,
+    // `access_token_uri`, `func set_client_secret(client_secret: String)`).
+    let after = if marker.ends_with('=') {
+        after
+    } else {
+        match after.strip_prefix(['=', ':']) {
+            Some(rest) => rest.trim_start_matches(|c: char| matches!(c, ' ' | '\t')),
+            None => return false,
+        }
+    };
+
+    let quote = after
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\'' | '`'));
+    let value: String = if let Some(quote) = quote {
+        after[1..].chars().take_while(|&c| c != quote).collect()
+    } else {
+        after
+            .chars()
+            .take_while(|&c| {
+                !c.is_whitespace()
+                    && !matches!(c, '"' | '\'' | '#' | ';' | ',' | '}' | ')' | ']')
+            })
+            .collect()
+    };
+
+    if value.is_empty() || value.starts_with('$') || value.starts_with('<') {
+        return false;
+    }
+
+    // An unquoted value containing `.` or `(` is virtually always a code or
+    // config reference (os.environ[...], getenv(...), secrets.get(...))
+    // rather than a literal secret - real unquoted values (.env files, shell
+    // exports, unquoted YAML scalars) don't look like that.
+    if quote.is_none() && (value.contains('.') || value.contains('(')) {
+        return false;
+    }
+
+    let value_lower = value.to_ascii_lowercase();
+    let marker_word = marker.trim_end_matches('=');
+    if value_lower.contains(marker_word) {
+        // Self-referential assignment (`client_secret = _client_secret`,
+        // `self.token = token`) - a variable/parameter being passed around,
+        // not a literal value.
+        return false;
+    }
+
+    let placeholder_words = [
+        "changeme", "your", "xxxx", "todo", "example", "placeholder", "insert", "replace",
+        "none", "null", "fake", "dummy",
+    ];
+    if placeholder_words.iter().any(|word| value_lower.contains(word)) {
+        return false;
+    }
+
+    value.len() >= 8
 }
 
 fn security_note(path: &Path, file_size: u64) -> Option<String> {
@@ -670,7 +778,11 @@ fn security_note(path: &Path, file_size: u64) -> Option<String> {
 
     if file_size <= SECRET_CONTENT_SCAN_MAX_SIZE && should_scan_text_content(path) {
         if let Ok(content) = fs::read_to_string(path) {
-            return content_secret_note(&content);
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            return content_secret_note(file_name, &content);
         }
     }
 
@@ -1158,10 +1270,113 @@ mod tests {
 
     #[test]
     fn content_secret_note_detects_known_markers() {
-        assert!(content_secret_note("-----BEGIN RSA PRIVATE KEY-----").is_some());
-        assert!(content_secret_note("aws_key = AKIAABCDEFGHIJKLMNOP").is_some());
-        assert!(content_secret_note("API_KEY=abcdef123456").is_some());
-        assert!(content_secret_note("just a normal readme").is_none());
+        assert!(content_secret_note("config.rs", "-----BEGIN RSA PRIVATE KEY-----").is_some());
+        assert!(content_secret_note("config.rs", "aws_key = AKIAABCDEFGHIJKLMNOP").is_some());
+        assert!(content_secret_note("config.rs", "just a normal readme").is_none());
+    }
+
+    #[test]
+    fn content_secret_note_flags_quoted_and_unquoted_literal_values() {
+        assert!(content_secret_note("config.rs", "API_KEY=abcdef123456").is_some());
+        assert!(
+            content_secret_note("config.py", r#"api_key = "sk_live_51H8xyzABCDEFGHIJKLMNOP""#)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn content_secret_note_ignores_bare_property_access() {
+        // Reading a config value (as opposed to assigning a literal one) is
+        // not a leak - e.g. addons/godot-firebase's auth.gd does
+        // `_signup_request_url %= _config.apiKey` with no value in sight.
+        assert!(content_secret_note(
+            "auth.gd",
+            "_signup_request_url %= _config.apiKey\n_signin_request_url %= _config.apiKey"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn content_secret_note_ignores_self_referential_parameter_passing() {
+        // Getter/setter and constructor-argument patterns from
+        // addons/godot-firebase's auth_provider.gd and auth.gd: the "value"
+        // being assigned is just another variable named after the marker,
+        // not a literal secret.
+        assert!(content_secret_note(
+            "auth_provider.gd",
+            "func set_client_secret(client_secret: String) -> void:\n    self.client_secret = client_secret"
+        )
+        .is_none());
+        assert!(content_secret_note(
+            "auth.gd",
+            "provider.get_client_secret())\nclient_secret = _client_secret,"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn content_secret_note_ignores_marker_without_assignment_operator() {
+        // A marker that is part of a URL path/query fragment or an
+        // identifier (not followed by `=`/`:`) is not an assignment at all -
+        // e.g. godot-firebase's twitter.gd has both of these.
+        assert!(content_secret_note(
+            "twitter.gd",
+            "var request_token_endpoint: String = \"https://api.twitter.com/oauth/access_token?oauth_callback=\""
+        )
+        .is_none());
+        assert!(content_secret_note(
+            "twitter.gd",
+            "self.access_token_uri = \"https://api.twitter.com/2/oauth2/token\""
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn content_secret_note_ignores_environment_and_secrets_manager_references() {
+        // Shell/CI/env references are the *correct* way to handle
+        // credentials, not a leak of the credential itself.
+        assert!(
+            content_secret_note("README.md", r#"--apiKey "$APPLE_API_KEY_ID""#).is_none()
+        );
+        assert!(content_secret_note(
+            "deploy.yaml",
+            "api-key: ${{ secrets.IONOS_API_KEY }}"
+        )
+        .is_none());
+        assert!(
+            content_secret_note("app.py", "access_token = os.environ[\"MY_TOKEN\"]").is_none()
+        );
+    }
+
+    #[test]
+    fn content_secret_note_skips_markdown_prose_markers() {
+        assert!(content_secret_note(
+            "README.md",
+            "Set your api_key = \"a_real_looking_value_1234\" in the config."
+        )
+        .is_none());
+        // High-precision markers still apply to markdown.
+        assert!(content_secret_note("README.md", "-----BEGIN RSA PRIVATE KEY-----").is_some());
+    }
+
+    #[test]
+    fn content_secret_note_skips_public_firebase_config_files() {
+        // Real google-services.json nests the value under `current_key`, one
+        // level below `api_key`, so it would not match the marker's "value
+        // right after it" check even without the filename exception; use a
+        // flat shape here so the test isolates the exception itself.
+        let flat_api_key = r#"{"api_key": "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"}"#;
+        assert!(content_secret_note("google-services.json", flat_api_key).is_none());
+        assert!(content_secret_note("GoogleService-Info.plist", flat_api_key).is_none());
+        // Other files with the same content are not given this pass.
+        assert!(content_secret_note("config.json", flat_api_key).is_some());
+    }
+
+    #[test]
+    fn content_secret_note_ignores_placeholder_values() {
+        assert!(content_secret_note("config.rs", "api_key = \"changeme\"").is_none());
+        assert!(content_secret_note("config.rs", "api_key = \"your-api-key-here\"").is_none());
+        assert!(content_secret_note("config.rs", "api_key = \"\"").is_none());
     }
 
     #[test]
