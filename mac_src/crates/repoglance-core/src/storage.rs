@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -8,8 +9,8 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    Issue, IssueCategory, IssuePath, IssueSeverity, NewScan, RepositoryDetails, RepositoryOverview,
-    ScanSummary, ScoreLevel, ScorePenalty,
+    IgnoredFinding, Issue, IssueCategory, IssuePath, IssueSeverity, NewScan, RepositoryDetails,
+    RepositoryOverview, ScanSummary, ScoreLevel, ScorePenalty,
 };
 
 pub struct Storage {
@@ -114,13 +115,81 @@ impl Storage {
             Vec::new()
         };
         let history = self.scan_history(id)?;
+        let ignored_count = self.ignored_finding_count(id)?;
 
         Ok(RepositoryDetails {
             repository,
             latest_scan,
             issues,
             history,
+            ignored_count,
         })
+    }
+
+    /// Marks each `(category, path)` pair as ignored for this repository.
+    /// Already-ignored pairs are left as-is (their original `ignored_at` and
+    /// `id` are kept).
+    pub fn ignore_findings(&self, repository_id: i64, entries: &[(String, String)]) -> Result<()> {
+        let conn = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+        for (category, path) in entries {
+            conn.execute(
+                "INSERT OR IGNORE INTO ignored_findings (repository_id, category, path, note, ignored_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4)",
+                params![repository_id, category, path, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn unignore_finding(&self, id: i64) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM ignored_findings WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn ignored_findings(&self, repository_id: i64) -> Result<Vec<IgnoredFinding>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, repository_id, category, path, note, ignored_at
+             FROM ignored_findings WHERE repository_id = ?1 ORDER BY ignored_at DESC",
+        )?;
+        let rows = stmt.query_map(params![repository_id], |row| {
+            Ok(IgnoredFinding {
+                id: row.get(0)?,
+                repository_id: row.get(1)?,
+                category: IssueCategory::from_str(&row.get::<_, String>(2)?),
+                path: row.get(3)?,
+                note: row.get(4)?,
+                ignored_at: row.get(5)?,
+            })
+        })?;
+
+        let mut findings = Vec::new();
+        for row in rows {
+            findings.push(row?);
+        }
+        Ok(findings)
+    }
+
+    /// The `(category, path)` set used to filter scan results, in the shape
+    /// `scan_repository_path_with_options` expects.
+    pub fn ignored_findings_set(&self, repository_id: i64) -> Result<HashSet<(String, String)>> {
+        Ok(self
+            .ignored_findings(repository_id)?
+            .into_iter()
+            .map(|finding| (finding.category.as_str().to_string(), finding.path))
+            .collect())
+    }
+
+    fn ignored_finding_count(&self, repository_id: i64) -> Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM ignored_findings WHERE repository_id = ?1",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 
     pub fn save_scan(&self, scan: NewScan) -> Result<RepositoryDetails> {
@@ -307,7 +376,11 @@ fn scan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanSummary> {
 /// on-disk database that was never version-stamped before is in.
 type Migration = fn(&Connection) -> Result<()>;
 
-const MIGRATIONS: &[Migration] = &[migration_v1_initial_schema, migration_v2_add_security_score];
+const MIGRATIONS: &[Migration] = &[
+    migration_v1_initial_schema,
+    migration_v2_add_security_score,
+    migration_v3_add_ignored_findings,
+];
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -381,6 +454,23 @@ fn migration_v2_add_security_score(conn: &Connection) -> Result<()> {
         "security_score",
         "INTEGER NOT NULL DEFAULT 100",
     )
+}
+
+fn migration_v3_add_ignored_findings(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS ignored_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+            category TEXT NOT NULL,
+            path TEXT NOT NULL,
+            note TEXT,
+            ignored_at TEXT NOT NULL,
+            UNIQUE(repository_id, category, path)
+        );
+        ",
+    )?;
+    Ok(())
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
@@ -557,6 +647,52 @@ mod tests {
 
         let refetched = storage.details(repository.id).unwrap();
         assert_eq!(refetched.latest_scan.unwrap().security_score, 55);
+
+        let _ = fs::remove_dir_all(&repo_dir);
+    }
+
+    #[test]
+    fn ignore_findings_roundtrip_and_deduplicate() {
+        let path = temp_db_path("ignore_roundtrip");
+        let _guard = TempDb(path.clone());
+        let repo_dir = std::env::temp_dir().join(format!(
+            "repoglance_test_repo_ignore_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+
+        let storage = Storage::new(&path).unwrap();
+        let repository = storage.add_repository(&repo_dir).unwrap();
+
+        storage
+            .ignore_findings(
+                repository.id,
+                &[
+                    ("security".to_string(), ".env".to_string()),
+                    ("generated_artifact".to_string(), "node_modules".to_string()),
+                ],
+            )
+            .unwrap();
+        // Re-ignoring the same pair should not create a duplicate row.
+        storage
+            .ignore_findings(repository.id, &[("security".to_string(), ".env".to_string())])
+            .unwrap();
+
+        let findings = storage.ignored_findings(repository.id).unwrap();
+        assert_eq!(findings.len(), 2);
+
+        let set = storage.ignored_findings_set(repository.id).unwrap();
+        assert!(set.contains(&("security".to_string(), ".env".to_string())));
+        assert!(set.contains(&("generated_artifact".to_string(), "node_modules".to_string())));
+
+        let details = storage.details(repository.id).unwrap();
+        assert_eq!(details.ignored_count, 2);
+
+        let removed_id = findings[0].id;
+        storage.unignore_finding(removed_id).unwrap();
+        assert_eq!(storage.ignored_findings(repository.id).unwrap().len(), 1);
+        assert_eq!(storage.details(repository.id).unwrap().ignored_count, 1);
 
         let _ = fs::remove_dir_all(&repo_dir);
     }

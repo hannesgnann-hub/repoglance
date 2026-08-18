@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { RepositoryDetails, RepositoryOverview } from "../types";
+import type { IgnoredFinding, IssueCategory, RepositoryDetails, RepositoryOverview } from "../types";
 
 export function listRepositories() {
   return invoke<RepositoryOverview[]>("list_repositories");
@@ -61,4 +61,16 @@ export function applyGitignoreEntries(repositoryId: number, entries: string[]) {
 
 export function cancelScan(id: number) {
   return invoke<void>("cancel_scan", { id });
+}
+
+export function ignoreFindings(repositoryId: number, category: IssueCategory, paths: string[]) {
+  return invoke<RepositoryDetails>("ignore_findings", { repositoryId, category, paths });
+}
+
+export function listIgnoredFindings(repositoryId: number) {
+  return invoke<IgnoredFinding[]>("list_ignored_findings", { repositoryId });
+}
+
+export function unignoreFinding(id: number, repositoryId: number) {
+  return invoke<RepositoryDetails>("unignore_finding", { id, repositoryId });
 }

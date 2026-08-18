@@ -66,4 +66,14 @@ export interface RepositoryDetails {
   latest_scan?: ScanSummary | null;
   issues: Issue[];
   history: ScanSummary[];
+  ignored_count: number;
+}
+
+export interface IgnoredFinding {
+  id: number;
+  repository_id: number;
+  category: IssueCategory;
+  path: string;
+  note?: string | null;
+  ignored_at: string;
 }

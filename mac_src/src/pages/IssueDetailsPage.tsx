@@ -33,6 +33,7 @@ interface IssueDetailsPageProps {
   onBack: () => void;
   onDeletePaths: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
   onDeleteFromGitHistory: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
+  onIgnoreSelected: (relativePaths: string[]) => Promise<void>;
   onForcePush: () => Promise<void>;
   onPreviewForcePush: () => Promise<string[]>;
   onApplyGitignoreEntries: (entries: string[]) => Promise<void>;
@@ -46,6 +47,7 @@ export default function IssueDetailsPage({
   onBack,
   onDeletePaths,
   onDeleteFromGitHistory,
+  onIgnoreSelected,
   onForcePush,
   onPreviewForcePush,
   onApplyGitignoreEntries,
@@ -124,6 +126,17 @@ export default function IssueDetailsPage({
       selectedWorkingTreeFiles.map((file) => file.path),
       gitignoreEntries
     );
+    setSelectedPaths(new Set());
+  }
+
+  async function ignoreSelected() {
+    if (selectedFiles.length === 0) return;
+    const confirmed = window.confirm(
+      `Ignore ${selectedFiles.length} selected finding(s)?\n\nThey won't be flagged again for this repository until you un-ignore them from the repository's "Ignored" list.`
+    );
+    if (!confirmed) return;
+
+    await onIgnoreSelected(selectedFiles.map((file) => file.path));
     setSelectedPaths(new Set());
   }
 
@@ -240,6 +253,9 @@ export default function IssueDetailsPage({
               <button className="historyDangerButton" onClick={openDeleteOnGitDialogForSelection} disabled={loading}>
                 Delete on Git ({selectedFiles.length})
               </button>
+              <button className="secondaryButton" onClick={ignoreSelected} disabled={loading}>
+                Ignore ({selectedFiles.length})
+              </button>
             </div>
           ) : null}
 
@@ -298,8 +314,9 @@ export default function IssueDetailsPage({
           <p>
             Delete removes current working-tree files or directories only. Delete on Git removes the
             selected paths from Git history with a clean worktree requirement, then runs Git cleanup.
-            After Force Push, future clones can become smaller. Select one or more files above to act on
-            all of them at once.
+            After Force Push, future clones can become smaller. Ignore keeps the path(s) but excludes
+            them from future scans and the score - see the repository's "Ignored" list to undo this.
+            Select one or more files above to act on all of them at once.
           </p>
         </section>
       </main>

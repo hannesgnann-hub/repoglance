@@ -8,7 +8,8 @@ use std::{
 };
 
 use repoglance_core::{
-    scan_repository_path_with_options, RepositoryDetails, RepositoryOverview, ScanOptions, Storage,
+    scan_repository_path_with_options, IgnoredFinding, RepositoryDetails, RepositoryOverview,
+    ScanOptions, Storage,
 };
 use tauri::{image::Image, Manager, State};
 
@@ -113,6 +114,46 @@ fn add_gitignore_entries(repository_root: &Path, entries: &[String]) -> Result<(
     Ok(())
 }
 
+/// Marks each `(category, path)` pair from `paths` as ignored under
+/// `category` for this repository, then rescans so the change is reflected
+/// immediately.
+#[tauri::command]
+async fn ignore_findings(
+    repository_id: i64,
+    category: String,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<RepositoryDetails, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    let entries: Vec<(String, String)> = paths.into_iter().map(|path| (category.clone(), path)).collect();
+    storage.ignore_findings(repository_id, &entries).map_err(to_message)?;
+    drop(storage);
+
+    scan_and_save(repository_id, false, &state)
+}
+
+#[tauri::command]
+async fn list_ignored_findings(
+    repository_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<IgnoredFinding>, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    storage.ignored_findings(repository_id).map_err(to_message)
+}
+
+#[tauri::command]
+async fn unignore_finding(
+    id: i64,
+    repository_id: i64,
+    state: State<'_, AppState>,
+) -> Result<RepositoryDetails, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    storage.unignore_finding(id).map_err(to_message)?;
+    drop(storage);
+
+    scan_and_save(repository_id, false, &state)
+}
+
 fn scan_and_save(
     id: i64,
     deep_history: bool,
@@ -128,6 +169,7 @@ fn scan_and_save(
 
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     let repository = storage.repository(id).map_err(to_message)?;
+    let ignored = storage.ignored_findings_set(id).map_err(to_message)?;
     drop(storage);
 
     let is_cancelled = || {
@@ -141,6 +183,7 @@ fn scan_and_save(
         id,
         Path::new(&repository.path),
         ScanOptions { deep_history },
+        &ignored,
         &is_cancelled,
     )
     .map_err(to_message)?;
@@ -157,10 +200,12 @@ async fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<Reposit
         .into_iter()
         .filter(|repository| !repository.missing)
     {
+        let ignored = storage.ignored_findings_set(repository.id).unwrap_or_default();
         if let Ok(scan) = scan_repository_path_with_options(
             repository.id,
             Path::new(&repository.path),
             ScanOptions::quick(),
+            &ignored,
             &|| false,
         ) {
             let _ = storage.save_scan(scan);
@@ -205,10 +250,12 @@ async fn delete_repository_paths(
         add_gitignore_entries(&repository_root, &gitignore_entries)?;
     }
 
+    let ignored = storage.ignored_findings_set(repository_id).map_err(to_message)?;
     let scan = scan_repository_path_with_options(
         repository_id,
         &repository_root,
         ScanOptions::quick(),
+        &ignored,
         &|| false,
     )
     .map_err(to_message)?;
@@ -362,6 +409,9 @@ fn main() {
             force_push_repository,
             preview_force_push,
             apply_gitignore_entries,
+            ignore_findings,
+            list_ignored_findings,
+            unignore_finding,
             cancel_scan
         ])
         .run(tauri::generate_context!())

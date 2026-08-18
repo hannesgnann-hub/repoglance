@@ -10,6 +10,7 @@ interface RepositoryDetailsPageProps {
   onLongScan: () => Promise<void>;
   onRemove: () => Promise<void>;
   onOpenIssue: (issue: Issue) => void;
+  onOpenIgnored: () => void;
 }
 
 export default function RepositoryDetailsPage({
@@ -19,7 +20,8 @@ export default function RepositoryDetailsPage({
   onScan,
   onLongScan,
   onRemove,
-  onOpenIssue
+  onOpenIssue,
+  onOpenIgnored
 }: RepositoryDetailsPageProps) {
   const { repository, latest_scan: scan, issues } = details;
 
@@ -34,6 +36,11 @@ export default function RepositoryDetailsPage({
           </div>
         </div>
         <div className="actions">
+          {details.ignored_count > 0 ? (
+            <button className="secondaryButton" onClick={onOpenIgnored} disabled={loading}>
+              Ignored ({details.ignored_count})
+            </button>
+          ) : null}
           <button className="secondaryButton" onClick={onRemove} disabled={loading}>
             Remove
           </button>

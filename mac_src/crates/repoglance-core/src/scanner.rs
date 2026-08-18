@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -64,13 +64,24 @@ enum HistoryScan {
 }
 
 pub fn scan_repository_path(repository_id: i64, path: &Path) -> Result<NewScan> {
-    scan_repository_path_with_options(repository_id, path, ScanOptions::quick(), &|| false)
+    scan_repository_path_with_options(
+        repository_id,
+        path,
+        ScanOptions::quick(),
+        &HashSet::new(),
+        &|| false,
+    )
 }
 
+/// Scans `path`, then drops any affected path matching an entry in
+/// `ignored_findings` (keyed by `(category.as_str(), path)`) from the
+/// results before scoring, so previously-dismissed findings neither reappear
+/// nor count against the score.
 pub fn scan_repository_path_with_options(
     repository_id: i64,
     path: &Path,
     options: ScanOptions,
+    ignored_findings: &HashSet<(String, String)>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<NewScan> {
     if !path.join(".git").exists() {
@@ -111,6 +122,8 @@ pub fn scan_repository_path_with_options(
     issues.extend(branch_issues(path, &detected_at)?);
     trace("issues done");
 
+    let issues = filter_ignored_findings(issues, ignored_findings);
+
     let potential_cleanup = issues
         .iter()
         .map(|issue| issue.estimated_cleanup_bytes)
@@ -133,6 +146,47 @@ pub fn scan_repository_path_with_options(
         score_breakdown,
         issues,
     })
+}
+
+/// Drops affected paths that match an `(category, path)` entry in
+/// `ignored`, drops any issue left with no paths at all (it originally had
+/// some, but every one of them was ignored), and recomputes the cleanup
+/// estimate for categories whose estimate is a simple function of their
+/// remaining paths, mirroring how each category's constructor computes it.
+fn filter_ignored_findings(issues: Vec<NewIssue>, ignored: &HashSet<(String, String)>) -> Vec<NewIssue> {
+    if ignored.is_empty() {
+        return issues;
+    }
+
+    issues
+        .into_iter()
+        .filter_map(|mut issue| {
+            let had_paths = !issue.affected_paths.is_empty();
+            let category = issue.category.as_str();
+            issue
+                .affected_paths
+                .retain(|affected| !ignored.contains(&(category.to_string(), affected.path.clone())));
+
+            if had_paths && issue.affected_paths.is_empty() {
+                return None;
+            }
+
+            issue.estimated_cleanup_bytes = match issue.category {
+                IssueCategory::LargeFile | IssueCategory::GeneratedArtifact => {
+                    issue.affected_paths.iter().map(|p| p.size).sum()
+                }
+                IssueCategory::HistoricalLargeFile if issue.title == "Historical large files" => issue
+                    .affected_paths
+                    .iter()
+                    .filter(|p| !p.currently_exists)
+                    .map(|p| p.size)
+                    .sum(),
+                _ => issue.estimated_cleanup_bytes,
+            };
+
+            Some(issue)
+        })
+        .collect()
 }
 
 fn calculate_security_score(issues: &[NewIssue]) -> i64 {
@@ -1192,6 +1246,127 @@ fn trace(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issue_path(path: &str, size: u64, currently_exists: bool) -> IssuePath {
+        IssuePath {
+            path: path.into(),
+            size,
+            currently_exists,
+            note: None,
+        }
+    }
+
+    fn new_issue(category: IssueCategory, paths: Vec<IssuePath>, cleanup: u64, title: &str) -> NewIssue {
+        NewIssue {
+            category,
+            severity: IssueSeverity::Info,
+            title: title.into(),
+            description: "description".into(),
+            affected_paths: paths,
+            estimated_cleanup_bytes: cleanup,
+            detected_at: "2024-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn filter_ignored_findings_drops_matching_paths_and_recomputes_cleanup() {
+        let issues = vec![new_issue(
+            IssueCategory::GeneratedArtifact,
+            vec![
+                issue_path("node_modules", 1000, true),
+                issue_path("dist", 500, true),
+            ],
+            1500,
+            "Generated build artifacts",
+        )];
+        let ignored: HashSet<(String, String)> =
+            [("generated_artifact".to_string(), "node_modules".to_string())]
+                .into_iter()
+                .collect();
+
+        let filtered = filter_ignored_findings(issues, &ignored);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].affected_paths.len(), 1);
+        assert_eq!(filtered[0].affected_paths[0].path, "dist");
+        assert_eq!(filtered[0].estimated_cleanup_bytes, 500);
+    }
+
+    #[test]
+    fn filter_ignored_findings_drops_whole_issue_once_all_paths_are_ignored() {
+        let issues = vec![new_issue(
+            IssueCategory::Security,
+            vec![issue_path(".env", 100, true)],
+            0,
+            "Possible secrets or sensitive files",
+        )];
+        let ignored: HashSet<(String, String)> =
+            [("security".to_string(), ".env".to_string())].into_iter().collect();
+
+        let filtered = filter_ignored_findings(issues, &ignored);
+
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_ignored_findings_only_matches_within_the_same_category() {
+        let issues = vec![new_issue(
+            IssueCategory::LargeFile,
+            vec![issue_path("assets/video.mp4", 60_000_000, true)],
+            60_000_000,
+            "Large current files",
+        )];
+        // Same path, wrong category - should not match.
+        let ignored: HashSet<(String, String)> =
+            [("security".to_string(), "assets/video.mp4".to_string())]
+                .into_iter()
+                .collect();
+
+        let filtered = filter_ignored_findings(issues, &ignored);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].affected_paths.len(), 1);
+    }
+
+    #[test]
+    fn filter_ignored_findings_recomputes_historical_large_file_cleanup_from_deleted_only() {
+        let issues = vec![new_issue(
+            IssueCategory::HistoricalLargeFile,
+            vec![
+                issue_path("old-asset.bin", 60_000_000, false),
+                issue_path("still-here.bin", 70_000_000, true),
+            ],
+            60_000_000,
+            "Historical large files",
+        )];
+        // Ignoring the still-existing one shouldn't change the cleanup
+        // estimate, since it was never counted (currently_exists = true).
+        let ignored: HashSet<(String, String)> = [(
+            "historical_large_file".to_string(),
+            "still-here.bin".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        let filtered = filter_ignored_findings(issues, &ignored);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].estimated_cleanup_bytes, 60_000_000);
+    }
+
+    #[test]
+    fn filter_ignored_findings_is_a_no_op_with_empty_ignore_set() {
+        let issues = vec![new_issue(
+            IssueCategory::Branch,
+            vec![issue_path("old-feature", 0, true)],
+            0,
+            "Merged stale branches",
+        )];
+
+        let filtered = filter_ignored_findings(issues, &HashSet::new());
+
+        assert_eq!(filtered.len(), 1);
+    }
 
     /// Regression test for a bug where `stdin.write_all()` ran synchronously
     /// on the calling thread, before the timeout/cancellation loop started.

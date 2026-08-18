@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import LoadingIndicator from "./components/LoadingIndicator";
 import ScanProgress from "./components/ScanProgress";
 import Dashboard from "./pages/Dashboard";
+import IgnoredFindingsPage from "./pages/IgnoredFindingsPage";
 import IssueDetailsPage from "./pages/IssueDetailsPage";
 import RepositoryDetailsPage from "./pages/RepositoryDetailsPage";
 import {
@@ -12,23 +13,28 @@ import {
   deleteRepositoryPaths,
   forcePushRepository,
   getRepositoryDetails,
+  ignoreFindings,
+  listIgnoredFindings,
   listRepositories,
   previewForcePush,
   removeRepository,
   scanAllRepositories,
-  scanRepository
+  scanRepository,
+  unignoreFinding
 } from "./services/repoglance";
-import type { Issue, RepositoryDetails, RepositoryOverview } from "./types";
+import type { IgnoredFinding, Issue, RepositoryDetails, RepositoryOverview } from "./types";
 
 type Route =
   | { name: "dashboard" }
   | { name: "repository"; id: number }
-  | { name: "issue"; repositoryId: number; issueId: number };
+  | { name: "issue"; repositoryId: number; issueId: number }
+  | { name: "ignored"; repositoryId: number };
 
 export default function App() {
   const [route, setRoute] = useState<Route>({ name: "dashboard" });
   const [repositories, setRepositories] = useState<RepositoryOverview[]>([]);
   const [details, setDetails] = useState<RepositoryDetails | null>(null);
+  const [ignoredFindings, setIgnoredFindings] = useState<IgnoredFinding[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState("Working...");
   const [scanningRepositoryIds, setScanningRepositoryIds] = useState<number[]>([]);
@@ -62,6 +68,11 @@ export default function App() {
   async function refreshDetails(id: number) {
     const next = await getRepositoryDetails(id);
     setDetails(next);
+  }
+
+  async function refreshIgnoredFindings(repositoryId: number) {
+    const next = await listIgnoredFindings(repositoryId);
+    setIgnoredFindings(next);
   }
 
   async function run(action: () => Promise<void>, label = "Working...") {
@@ -118,6 +129,9 @@ export default function App() {
     if (route.name === "repository") {
       void run(() => refreshDetails(route.id), "Loading repository...");
     }
+    if (route.name === "ignored") {
+      void run(() => refreshIgnoredFindings(route.repositoryId), "Loading ignored findings...");
+    }
     if (route.name === "dashboard") {
       setDetails(null);
     }
@@ -151,6 +165,17 @@ export default function App() {
               await refreshRepositories();
             }, "Deleting on Git...")
           }
+          onIgnoreSelected={(relativePaths) =>
+            run(async () => {
+              const next = await ignoreFindings(route.repositoryId, selectedIssue.category, relativePaths);
+              setDetails(next);
+              await refreshRepositories();
+              const refreshedIssue = next.issues.find((issue) => issue.id === route.issueId);
+              if (!refreshedIssue) {
+                setRoute({ name: "repository", id: route.repositoryId });
+              }
+            }, "Ignoring...")
+          }
           onPreviewForcePush={() => previewForcePush(route.repositoryId)}
           onForcePush={() =>
             runAndThrow(async () => {
@@ -178,6 +203,30 @@ export default function App() {
     );
   }
 
+  if (route.name === "ignored" && details) {
+    return (
+      <>
+        {progress}
+        {loadingIndicator}
+        {error ? <div className="floatingNotice">{error}</div> : null}
+        <IgnoredFindingsPage
+          repository={details.repository}
+          findings={ignoredFindings}
+          loading={loading}
+          onBack={() => setRoute({ name: "repository", id: route.repositoryId })}
+          onUnignore={(id) =>
+            run(async () => {
+              const next = await unignoreFinding(id, route.repositoryId);
+              setDetails(next);
+              await refreshIgnoredFindings(route.repositoryId);
+              await refreshRepositories();
+            }, "Un-ignoring...")
+          }
+        />
+      </>
+    );
+  }
+
   if (route.name === "repository" && details) {
     return (
       <>
@@ -189,6 +238,7 @@ export default function App() {
           loading={loading}
           onBack={() => setRoute({ name: "dashboard" })}
           onOpenIssue={(issue) => setRoute({ name: "issue", repositoryId: route.id, issueId: issue.id })}
+          onOpenIgnored={() => setRoute({ name: "ignored", repositoryId: route.id })}
           onRemove={() =>
             run(async () => {
               await removeRepository(route.id);

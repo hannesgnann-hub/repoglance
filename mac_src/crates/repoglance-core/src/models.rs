@@ -17,6 +17,7 @@ pub struct RepositoryDetails {
     pub latest_scan: Option<ScanSummary>,
     pub issues: Vec<Issue>,
     pub history: Vec<ScanSummary>,
+    pub ignored_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,4 +174,17 @@ impl IssueSeverity {
             _ => Self::Info,
         }
     }
+}
+
+/// A (category, path) pair a user has explicitly marked as not an issue.
+/// Scans exclude matching paths from their results and score going forward,
+/// until the entry is removed again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IgnoredFinding {
+    pub id: i64,
+    pub repository_id: i64,
+    pub category: IssueCategory,
+    pub path: String,
+    pub note: Option<String>,
+    pub ignored_at: String,
 }
