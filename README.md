@@ -2,6 +2,18 @@
 
 Repoglance is a local Git repository health and cleanup dashboard.
 
+[GitHub](https://github.com/hannesgnann-hub/repoglance)
+
+## ❤️ Support Repoglance
+
+Hi, I'm Hannes, the creator of Repoglance.
+
+If Repoglance saves you time (or disk space), consider supporting its
+development. Your sponsorship helps me fix bugs, develop new features, and
+keep Repoglance free and open source.
+
+[Become a GitHub Sponsor](https://github.com/sponsors/hannesgnann-hub)
+
 Repoglance scans local Git repositories, stores scan history in its own SQLite
 database, and highlights cleanup and security issues that may deserve attention.
 
