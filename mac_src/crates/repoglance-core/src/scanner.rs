@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -22,6 +22,13 @@ const QUICK_GIT_COMMAND_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 const DEEP_GIT_COMMAND_TIMEOUT: StdDuration = StdDuration::from_secs(120);
 const QUICK_HISTORY_OBJECT_LIMIT: usize = 120_000;
 const DEEP_HISTORY_OBJECT_LIMIT: usize = 500_000;
+/// Files larger than this are not read for content-based secret scanning
+/// (filename/extension based checks still apply regardless of size).
+const SECRET_CONTENT_SCAN_MAX_SIZE: u64 = 1024 * 1024;
+/// Upper bound on how many historical blobs get their content fetched and
+/// scanned for secret patterns in a single scan, to keep `git cat-file
+/// --batch` calls bounded on repositories with a lot of history.
+const HISTORY_SECRET_CANDIDATE_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanOptions {
@@ -41,6 +48,19 @@ struct WorkingTreeScan {
     large_files: Vec<IssuePath>,
     generated_artifacts: Vec<IssuePath>,
     security_risks: Vec<IssuePath>,
+}
+
+/// A blob reachable from any ref, as reported by `git rev-list --objects --all`
+/// plus `git cat-file --batch-check`.
+struct HistoryBlob {
+    object_id: String,
+    size: u64,
+    path: String,
+}
+
+enum HistoryScan {
+    Blobs(Vec<HistoryBlob>),
+    Skipped(NewIssue),
 }
 
 pub fn scan_repository_path(repository_id: i64, path: &Path) -> Result<NewScan> {
@@ -64,7 +84,7 @@ pub fn scan_repository_path_with_options(
     let working_tree = scan_working_tree(path, is_cancelled)?;
     trace("working tree done");
     let working_tree_size = working_tree.size;
-    let git_size = directory_size(&path.join(".git"), false)?;
+    let git_size = fast_directory_size(&path.join(".git"))?;
     trace("git size done");
     let total_size = working_tree_size.saturating_add(git_size);
 
@@ -75,7 +95,7 @@ pub fn scan_repository_path_with_options(
         &detected_at,
     ));
     issues.extend(large_current_files(working_tree.large_files, &detected_at));
-    issues.extend(historical_large_files(
+    issues.extend(historical_git_issues(
         path,
         &detected_at,
         options,
@@ -297,12 +317,42 @@ fn large_current_files(files: Vec<IssuePath>, detected_at: &str) -> Vec<NewIssue
     }]
 }
 
-fn historical_large_files(
+/// Runs the (potentially expensive) history object walk once and derives both
+/// the historical-large-file issue and the historical-secret issue from it.
+fn historical_git_issues(
     path: &Path,
     detected_at: &str,
     options: ScanOptions,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<NewIssue>> {
+    let timeout = if options.deep_history {
+        DEEP_GIT_COMMAND_TIMEOUT
+    } else {
+        QUICK_GIT_COMMAND_TIMEOUT
+    };
+
+    match scan_history_blob_metadata(path, detected_at, options, is_cancelled)? {
+        HistoryScan::Skipped(issue) => Ok(vec![issue]),
+        HistoryScan::Blobs(blobs) => {
+            let mut issues = historical_large_files_from_blobs(path, detected_at, &blobs);
+            issues.extend(historical_secret_files(
+                path,
+                detected_at,
+                &blobs,
+                timeout,
+                is_cancelled,
+            )?);
+            Ok(issues)
+        }
+    }
+}
+
+fn scan_history_blob_metadata(
+    path: &Path,
+    detected_at: &str,
+    options: ScanOptions,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<HistoryScan> {
     let timeout = if options.deep_history {
         DEEP_GIT_COMMAND_TIMEOUT
     } else {
@@ -322,20 +372,20 @@ fn historical_large_files(
     ) {
         Ok(objects) => objects,
         Err(error) => {
-            return Ok(vec![history_scan_skipped(
+            return Ok(HistoryScan::Skipped(history_scan_skipped(
                 detected_at,
                 format!("Git history object enumeration did not finish quickly: {error}"),
-            )]);
+            )));
         }
     };
     if objects.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(HistoryScan::Blobs(Vec::new()));
     }
     if objects.lines().count() > object_limit {
-        return Ok(vec![history_scan_skipped(
+        return Ok(HistoryScan::Skipped(history_scan_skipped(
             detected_at,
             format!("Git history contains more than {object_limit} objects."),
-        )]);
+        )));
     }
 
     let stdout = match git_output_with_stdin(
@@ -350,36 +400,57 @@ fn historical_large_files(
     ) {
         Ok(stdout) => stdout,
         Err(_) => {
-            return Ok(vec![history_scan_skipped(
+            return Ok(HistoryScan::Skipped(history_scan_skipped(
                 detected_at,
                 "Git object inspection did not complete successfully.".into(),
-            )]);
+            )));
         }
     };
-    let mut files = Vec::new();
-    let mut seen = BTreeSet::new();
 
+    let mut blobs = Vec::new();
     for line in stdout.lines() {
         let mut parts = line.splitn(4, ' ');
         let object_type = parts.next().unwrap_or_default();
-        let _object_id = parts.next();
+        let object_id = parts.next().unwrap_or_default();
         let size = parts
             .next()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
         let object_path = parts.next().unwrap_or_default();
 
-        if object_type != "blob" || size < LARGE_FILE_THRESHOLD || object_path.is_empty() {
+        if object_type != "blob" || object_path.is_empty() {
             continue;
         }
-        let key = format!("{object_path}:{size}");
+        blobs.push(HistoryBlob {
+            object_id: object_id.to_string(),
+            size,
+            path: object_path.to_string(),
+        });
+    }
+
+    Ok(HistoryScan::Blobs(blobs))
+}
+
+fn historical_large_files_from_blobs(
+    path: &Path,
+    detected_at: &str,
+    blobs: &[HistoryBlob],
+) -> Vec<NewIssue> {
+    let mut files = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for blob in blobs {
+        if blob.size < LARGE_FILE_THRESHOLD {
+            continue;
+        }
+        let key = format!("{}:{}", blob.path, blob.size);
         if !seen.insert(key) {
             continue;
         }
-        let currently_exists = path.join(object_path).exists();
+        let currently_exists = path.join(&blob.path).exists();
         files.push(IssuePath {
-            path: object_path.into(),
-            size,
+            path: blob.path.clone(),
+            size: blob.size,
             currently_exists,
             note: Some(if currently_exists {
                 "File currently exists".into()
@@ -390,7 +461,7 @@ fn historical_large_files(
     }
 
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let cleanup = files
@@ -398,7 +469,7 @@ fn historical_large_files(
         .filter(|file| !file.currently_exists)
         .map(|file| file.size)
         .sum();
-    Ok(vec![NewIssue {
+    vec![NewIssue {
         category: IssueCategory::HistoricalLargeFile,
         severity: IssueSeverity::Warning,
         title: "Historical large files".into(),
@@ -406,7 +477,90 @@ fn historical_large_files(
         affected_paths: files,
         estimated_cleanup_bytes: cleanup,
         detected_at: detected_at.into(),
+    }]
+}
+
+/// Looks for likely secrets among *historical* blobs: filenames/extensions
+/// that are always suspicious are flagged directly, while ambiguous text
+/// files have their content fetched (bounded by `HISTORY_SECRET_CANDIDATE_LIMIT`)
+/// and scanned with the same markers used for the working tree.
+fn historical_secret_files(
+    path: &Path,
+    detected_at: &str,
+    blobs: &[HistoryBlob],
+    timeout: StdDuration,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<NewIssue>> {
+    let mut findings: Vec<IssuePath> = Vec::new();
+    let mut seen_paths: BTreeSet<String> = BTreeSet::new();
+    let mut content_candidates: Vec<&HistoryBlob> = Vec::new();
+
+    for blob in blobs {
+        if seen_paths.contains(&blob.path) {
+            continue;
+        }
+        let blob_path = Path::new(&blob.path);
+        if let Some(note) = sensitive_filename_note(blob_path) {
+            findings.push(history_secret_path(path, &blob.path, blob.size, note));
+            seen_paths.insert(blob.path.clone());
+            continue;
+        }
+        if blob.size <= SECRET_CONTENT_SCAN_MAX_SIZE
+            && should_scan_text_content(blob_path)
+            && content_candidates.len() < HISTORY_SECRET_CANDIDATE_LIMIT
+        {
+            content_candidates.push(blob);
+        }
+    }
+
+    if !content_candidates.is_empty() && !is_cancelled() {
+        let ids = content_candidates
+            .iter()
+            .map(|blob| blob.object_id.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Ok(contents) =
+            git_batch_object_contents(path, &ids, timeout, is_cancelled)
+        {
+            for blob in &content_candidates {
+                if seen_paths.contains(&blob.path) {
+                    continue;
+                }
+                let Some(content_bytes) = contents.get(&blob.object_id) else {
+                    continue;
+                };
+                let content = String::from_utf8_lossy(content_bytes);
+                if let Some(note) = content_secret_note(&content) {
+                    findings.push(history_secret_path(path, &blob.path, blob.size, note));
+                    seen_paths.insert(blob.path.clone());
+                }
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![NewIssue {
+        category: IssueCategory::Security,
+        severity: IssueSeverity::Critical,
+        title: "Possible secrets in Git history".into(),
+        description: "Files or content patterns that may expose credentials, private keys, tokens, or local environment secrets were found in earlier Git history. Deleting the current file is not enough to remove them; rotate any exposed credentials and consider rewriting history.".into(),
+        affected_paths: findings,
+        estimated_cleanup_bytes: 0,
+        detected_at: detected_at.into(),
     }])
+}
+
+fn history_secret_path(root: &Path, object_path: &str, size: u64, note: String) -> IssuePath {
+    let currently_exists = root.join(object_path).exists();
+    IssuePath {
+        path: object_path.into(),
+        size,
+        currently_exists,
+        note: Some(note),
+    }
 }
 
 fn history_scan_skipped(detected_at: &str, reason: String) -> NewIssue {
@@ -454,7 +608,8 @@ fn security_issues(files: Vec<IssuePath>, detected_at: &str) -> Vec<NewIssue> {
     }]
 }
 
-fn security_note(path: &Path, file_size: u64) -> Option<String> {
+/// Filename/extension based secret heuristics that need no file content.
+fn sensitive_filename_note(path: &Path) -> Option<String> {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -477,29 +632,45 @@ fn security_note(path: &Path, file_size: u64) -> Option<String> {
         return Some("Possible private key or certificate material".into());
     }
 
-    if file_size <= 1024 * 1024 && should_scan_text_content(path) {
+    None
+}
+
+/// Content-based secret heuristics, shared between working-tree files and
+/// historical blob content.
+fn content_secret_note(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    if content.contains("-----BEGIN") && content.contains("PRIVATE KEY-----") {
+        return Some("Private key marker".into());
+    }
+    if content.contains("AKIA") {
+        return Some("Possible AWS access key".into());
+    }
+    for marker in [
+        "api_key",
+        "apikey",
+        "secret_key",
+        "client_secret",
+        "access_token",
+        "private_token",
+        "password=",
+        "token=",
+    ] {
+        if lower.contains(marker) {
+            return Some(format!("Possible secret marker: {marker}"));
+        }
+    }
+
+    None
+}
+
+fn security_note(path: &Path, file_size: u64) -> Option<String> {
+    if let Some(note) = sensitive_filename_note(path) {
+        return Some(note);
+    }
+
+    if file_size <= SECRET_CONTENT_SCAN_MAX_SIZE && should_scan_text_content(path) {
         if let Ok(content) = fs::read_to_string(path) {
-            let lower = content.to_ascii_lowercase();
-            if content.contains("-----BEGIN") && content.contains("PRIVATE KEY-----") {
-                return Some("Private key marker".into());
-            }
-            if content.contains("AKIA") {
-                return Some("Possible AWS access key".into());
-            }
-            for marker in [
-                "api_key",
-                "apikey",
-                "secret_key",
-                "client_secret",
-                "access_token",
-                "private_token",
-                "password=",
-                "token=",
-            ] {
-                if lower.contains(marker) {
-                    return Some(format!("Possible secret marker: {marker}"));
-                }
-            }
+            return content_secret_note(&content);
         }
     }
 
@@ -738,6 +909,84 @@ fn git_output_with_stdin<const N: usize>(
     timeout: StdDuration,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String> {
+    let bytes =
+        git_output_bytes_with_stdin(path, args, stdin_input.as_bytes(), timeout, is_cancelled)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Fetches the content of a batch of Git objects by id via `git cat-file
+/// --batch`, keyed by object id. Missing objects are skipped; non-blob
+/// objects are skipped too since only blob content is useful for secret
+/// scanning.
+fn git_batch_object_contents(
+    path: &Path,
+    object_ids_input: &str,
+    timeout: StdDuration,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<HashMap<String, Vec<u8>>> {
+    let bytes = git_output_bytes_with_stdin(
+        path,
+        ["cat-file", "--batch"],
+        object_ids_input.as_bytes(),
+        timeout,
+        is_cancelled,
+    )?;
+    Ok(parse_batch_output(&bytes))
+}
+
+/// Parses the output of `git cat-file --batch`, whose entries look like
+/// `<sha> <type> <size>\n<content>\n` (or `<sha> missing\n` for unknown ids).
+fn parse_batch_output(data: &[u8]) -> HashMap<String, Vec<u8>> {
+    let mut results = HashMap::new();
+    let mut idx = 0;
+
+    while idx < data.len() {
+        let newline_pos = match data[idx..].iter().position(|&byte| byte == b'\n') {
+            Some(offset) => idx + offset,
+            None => break,
+        };
+        let header = String::from_utf8_lossy(&data[idx..newline_pos]).into_owned();
+        idx = newline_pos + 1;
+
+        let mut parts = header.split_whitespace();
+        let object_id = parts.next().unwrap_or_default().to_string();
+        if object_id.is_empty() {
+            continue;
+        }
+        let second = parts.next().unwrap_or_default();
+        if second == "missing" {
+            continue;
+        }
+        let object_type = second.to_string();
+        let size: usize = match parts.next().and_then(|value| value.parse().ok()) {
+            Some(size) => size,
+            None => break,
+        };
+
+        if idx + size > data.len() {
+            break;
+        }
+        let content = data[idx..idx + size].to_vec();
+        idx += size;
+        if idx < data.len() && data[idx] == b'\n' {
+            idx += 1;
+        }
+
+        if object_type == "blob" {
+            results.insert(object_id, content);
+        }
+    }
+
+    results
+}
+
+fn git_output_bytes_with_stdin<const N: usize>(
+    path: &Path,
+    args: [&str; N],
+    stdin_input: &[u8],
+    timeout: StdDuration,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>> {
     let mut child = Command::new("git")
         .current_dir(path)
         .args(args)
@@ -756,8 +1005,8 @@ fn git_output_with_stdin<const N: usize>(
         .take()
         .ok_or_else(|| anyhow!("failed to capture git stderr"))?;
     let stdout_reader = thread::spawn(move || {
-        let mut output = String::new();
-        let _ = stdout.read_to_string(&mut output);
+        let mut output = Vec::new();
+        let _ = stdout.read_to_end(&mut output);
         output
     });
     let stderr_reader = thread::spawn(move || {
@@ -767,7 +1016,7 @@ fn git_output_with_stdin<const N: usize>(
     });
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_input.as_bytes())?;
+        stdin.write_all(stdin_input)?;
     }
 
     let started_at = Instant::now();
@@ -812,5 +1061,84 @@ fn check_cancelled(is_cancelled: &dyn Fn() -> bool) -> Result<()> {
 fn trace(message: &str) {
     if std::env::var_os("REPOGLANCE_TRACE").is_some() {
         eprintln!("repoglance trace: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_filename_note_flags_dotenv() {
+        assert!(sensitive_filename_note(Path::new(".env")).is_some());
+        assert!(sensitive_filename_note(Path::new("config/.env.production")).is_some());
+        assert!(sensitive_filename_note(Path::new("id_rsa")).is_some());
+        assert!(sensitive_filename_note(Path::new("README.md")).is_none());
+    }
+
+    #[test]
+    fn sensitive_filename_note_flags_key_extensions() {
+        assert!(sensitive_filename_note(Path::new("certs/server.pem")).is_some());
+        assert!(sensitive_filename_note(Path::new("client.p12")).is_some());
+        assert!(sensitive_filename_note(Path::new("notes.txt")).is_none());
+    }
+
+    #[test]
+    fn content_secret_note_detects_known_markers() {
+        assert!(content_secret_note("-----BEGIN RSA PRIVATE KEY-----").is_some());
+        assert!(content_secret_note("aws_key = AKIAABCDEFGHIJKLMNOP").is_some());
+        assert!(content_secret_note("API_KEY=abcdef123456").is_some());
+        assert!(content_secret_note("just a normal readme").is_none());
+    }
+
+    #[test]
+    fn should_scan_text_content_covers_common_source_extensions() {
+        assert!(should_scan_text_content(Path::new("src/main.rs")));
+        assert!(should_scan_text_content(Path::new(".npmrc")));
+        assert!(!should_scan_text_content(Path::new("image.png")));
+    }
+
+    #[test]
+    fn is_generated_file_matches_known_extensions() {
+        assert!(is_generated_file(Path::new("Main.class")));
+        assert!(is_generated_file(Path::new("archive.tar")));
+        assert!(is_generated_file(Path::new(".DS_Store")));
+        assert!(!is_generated_file(Path::new("main.rs")));
+    }
+
+    #[test]
+    fn is_generated_directory_name_matches_known_names() {
+        assert!(is_generated_directory_name(Path::new("/repo/node_modules")));
+        assert!(is_generated_directory_name(Path::new("/repo/target")));
+        assert!(!is_generated_directory_name(Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn parse_batch_output_extracts_blob_content_and_skips_missing() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"aaaa blob 5\nhello\n");
+        data.extend_from_slice(b"bbbb missing\n");
+        data.extend_from_slice(b"cccc tree 4\nabcd\n");
+
+        let parsed = parse_batch_output(&data);
+
+        assert_eq!(parsed.get("aaaa").map(|v| v.as_slice()), Some(&b"hello"[..]));
+        assert!(!parsed.contains_key("bbbb"));
+        assert!(!parsed.contains_key("cccc"));
+    }
+
+    #[test]
+    fn parse_batch_output_handles_binary_content() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"deadbeef blob 4\n");
+        data.extend_from_slice(&[0u8, 159, 146, 150]);
+        data.push(b'\n');
+
+        let parsed = parse_batch_output(&data);
+
+        assert_eq!(
+            parsed.get("deadbeef").map(|v| v.as_slice()),
+            Some(&[0u8, 159, 146, 150][..])
+        );
     }
 }
