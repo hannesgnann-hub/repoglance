@@ -1004,6 +1004,7 @@ fn git_output_bytes_with_stdin<const N: usize>(
         .stderr
         .take()
         .ok_or_else(|| anyhow!("failed to capture git stderr"))?;
+    let stdin = child.stdin.take();
     let stdout_reader = thread::spawn(move || {
         let mut output = Vec::new();
         let _ = stdout.read_to_end(&mut output);
@@ -1015,15 +1016,25 @@ fn git_output_bytes_with_stdin<const N: usize>(
         output
     });
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_input)?;
-    }
+    // Writing stdin must not happen on this thread: for large inputs (e.g. the
+    // full object list piped into `cat-file --batch-check` on a repository
+    // with a lot of history) this call can block on the OS pipe buffer for far
+    // longer than expected, and if it did that here - before the timeout loop
+    // below even starts - neither the timeout nor cancellation could ever
+    // interrupt it, hanging the scan regardless of the configured timeout.
+    let stdin_input = stdin_input.to_vec();
+    let stdin_writer = thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&stdin_input);
+        }
+    });
 
     let started_at = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
             let stdout = stdout_reader.join().unwrap_or_default();
             let stderr = stderr_reader.join().unwrap_or_default();
+            let _ = stdin_writer.join();
             if !status.success() {
                 return Err(anyhow!(stderr.trim().to_string()));
             }
@@ -1035,6 +1046,7 @@ fn git_output_bytes_with_stdin<const N: usize>(
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
+            let _ = stdin_writer.join();
             return Err(anyhow!("scan cancelled"));
         }
 
@@ -1043,6 +1055,7 @@ fn git_output_bytes_with_stdin<const N: usize>(
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
+            let _ = stdin_writer.join();
             return Err(anyhow!("git command timed out"));
         }
 
@@ -1067,6 +1080,66 @@ fn trace(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for a bug where `stdin.write_all()` ran synchronously
+    /// on the calling thread, before the timeout/cancellation loop started.
+    /// For large payloads (e.g. the full object list piped into
+    /// `cat-file --batch-check` on a repository with a lot of history) that
+    /// write could block on the OS pipe buffer independently of - and
+    /// unprotected by - the configured timeout, hanging the scan regardless
+    /// of quick vs. deep mode. The write now happens on its own thread so the
+    /// timeout loop always runs concurrently with it.
+    #[test]
+    fn git_output_with_stdin_survives_stdin_larger_than_pipe_buffer() {
+        let dir = std::env::temp_dir().join(format!(
+            "repoglance_scanner_test_large_stdin_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let run_git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .args(args)
+                .status()
+                .unwrap()
+        };
+        assert!(run_git(&["init", "-q"]).success());
+        fs::write(dir.join("file.txt"), b"hello").unwrap();
+        assert!(run_git(&["add", "."]).success());
+        assert!(run_git(&["commit", "-q", "-m", "init"]).success());
+
+        // Several times the typical 64KB pipe buffer, so the write cannot
+        // complete without the concurrent stdout drain keeping the child
+        // able to make progress.
+        let object_count = 50_000;
+        let large_input = "HEAD\n".repeat(object_count);
+
+        let started = Instant::now();
+        let output = git_output_with_stdin(
+            &dir,
+            ["cat-file", "--batch-check=%(objecttype)"],
+            &large_input,
+            StdDuration::from_secs(10),
+            &|| false,
+        )
+        .unwrap();
+
+        assert!(
+            started.elapsed() < StdDuration::from_secs(9),
+            "should complete well before the timeout, not hang until it"
+        );
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), object_count);
+        assert!(lines.iter().all(|line| *line == "commit"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sensitive_filename_note_flags_dotenv() {
