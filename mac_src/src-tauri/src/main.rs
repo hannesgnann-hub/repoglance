@@ -18,25 +18,25 @@ struct AppState {
 }
 
 #[tauri::command]
-fn add_repository(path: String, state: State<'_, AppState>) -> Result<RepositoryOverview, String> {
+async fn add_repository(path: String, state: State<'_, AppState>) -> Result<RepositoryOverview, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     storage.add_repository(Path::new(&path)).map_err(to_message)
 }
 
 #[tauri::command]
-fn remove_repository(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+async fn remove_repository(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     storage.remove_repository(id).map_err(to_message)
 }
 
 #[tauri::command]
-fn list_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOverview>, String> {
+async fn list_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOverview>, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     storage.repositories().map_err(to_message)
 }
 
 #[tauri::command]
-fn get_repository_details(
+async fn get_repository_details(
     id: i64,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
@@ -45,7 +45,7 @@ fn get_repository_details(
 }
 
 #[tauri::command]
-fn scan_repository(
+async fn scan_repository(
     id: i64,
     deep_history: Option<bool>,
     state: State<'_, AppState>,
@@ -54,7 +54,7 @@ fn scan_repository(
 }
 
 #[tauri::command]
-fn cancel_scan(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+async fn cancel_scan(id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let mut cancelled = state
         .cancelled_scans
         .lock()
@@ -64,7 +64,7 @@ fn cancel_scan(id: i64, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn apply_gitignore_entries(
+async fn apply_gitignore_entries(
     repository_id: i64,
     entries: Vec<String>,
     state: State<'_, AppState>,
@@ -141,7 +141,7 @@ fn scan_and_save(
 }
 
 #[tauri::command]
-fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOverview>, String> {
+async fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOverview>, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     let repositories = storage.repositories().map_err(to_message)?;
 
@@ -163,7 +163,7 @@ fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOve
 }
 
 #[tauri::command]
-fn delete_repository_path(
+async fn delete_repository_path(
     repository_id: i64,
     relative_path: String,
     state: State<'_, AppState>,
@@ -197,7 +197,7 @@ fn delete_repository_path(
 }
 
 #[tauri::command]
-fn delete_path_from_git_history(
+async fn delete_path_from_git_history(
     repository_id: i64,
     relative_path: String,
     confirmation: String,
@@ -224,7 +224,7 @@ fn delete_path_from_git_history(
 }
 
 #[tauri::command]
-fn force_push_repository(repository_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+async fn force_push_repository(repository_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     let repository = storage.repository(repository_id).map_err(to_message)?;
     drop(storage);
@@ -242,7 +242,7 @@ fn force_push_repository(repository_id: i64, state: State<'_, AppState>) -> Resu
 /// `--dry-run --porcelain` push (no history is touched) so the user sees
 /// what they are about to overwrite before confirming a destructive push.
 #[tauri::command]
-fn preview_force_push(repository_id: i64, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+async fn preview_force_push(repository_id: i64, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     let repository = storage.repository(repository_id).map_err(to_message)?;
     drop(storage);
