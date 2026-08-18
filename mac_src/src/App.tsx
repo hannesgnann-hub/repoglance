@@ -134,9 +134,9 @@ export default function App() {
           issue={selectedIssue}
           loading={loading}
           onBack={() => setRoute({ name: "repository", id: route.repositoryId })}
-          onDeletePath={(relativePath) =>
+          onDeletePath={(relativePath, gitignoreEntry) =>
             run(async () => {
-              const next = await deleteRepositoryPath(route.repositoryId, relativePath);
+              const next = await deleteRepositoryPath(route.repositoryId, relativePath, gitignoreEntry);
               setDetails(next);
               await refreshRepositories();
               const refreshedIssue = next.issues.find((issue) => issue.id === route.issueId);

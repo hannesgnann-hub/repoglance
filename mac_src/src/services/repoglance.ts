@@ -25,8 +25,12 @@ export function getRepositoryDetails(id: number) {
   return invoke<RepositoryDetails>("get_repository_details", { id });
 }
 
-export function deleteRepositoryPath(repositoryId: number, relativePath: string) {
-  return invoke<RepositoryDetails>("delete_repository_path", { repositoryId, relativePath });
+export function deleteRepositoryPath(repositoryId: number, relativePath: string, gitignoreEntry?: string) {
+  return invoke<RepositoryDetails>("delete_repository_path", {
+    repositoryId,
+    relativePath,
+    gitignoreEntry: gitignoreEntry ?? null
+  });
 }
 
 export function deletePathFromGitHistory(repositoryId: number, relativePath: string, confirmation: string) {

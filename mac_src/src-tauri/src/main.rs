@@ -76,6 +76,14 @@ async fn apply_gitignore_entries(
     let repository_root = Path::new(&repository.path)
         .canonicalize()
         .map_err(|err| format!("Repository path could not be resolved: {err}"))?;
+    add_gitignore_entries(&repository_root, &entries)?;
+
+    scan_and_save(repository_id, false, &state)
+}
+
+/// Appends any of `entries` that aren't already present (as a whole,
+/// trimmed line) to the repository's `.gitignore`, creating it if needed.
+fn add_gitignore_entries(repository_root: &Path, entries: &[String]) -> Result<(), String> {
     let gitignore_path = repository_root.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
     let mut next = existing.clone();
@@ -102,7 +110,7 @@ async fn apply_gitignore_entries(
             .map_err(|err| format!("{} could not be updated: {err}", gitignore_path.display()))?;
     }
 
-    scan_and_save(repository_id, false, &state)
+    Ok(())
 }
 
 fn scan_and_save(
@@ -166,6 +174,7 @@ async fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<Reposit
 async fn delete_repository_path(
     repository_id: i64,
     relative_path: String,
+    gitignore_entry: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
@@ -184,6 +193,10 @@ async fn delete_repository_path(
     } else {
         fs::remove_file(&target)
             .map_err(|err| format!("{} could not be deleted: {err}", target.display()))?;
+    }
+
+    if let Some(entry) = gitignore_entry {
+        add_gitignore_entries(&repository_root, std::slice::from_ref(&entry))?;
     }
 
     let scan = scan_repository_path_with_options(

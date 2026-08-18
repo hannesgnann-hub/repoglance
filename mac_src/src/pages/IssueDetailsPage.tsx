@@ -1,13 +1,32 @@
 import { useState } from "react";
 import { formatBytes } from "../components/Format";
-import type { Issue, RepositoryDetails } from "../types";
+import type { Issue, IssuePath, RepositoryDetails } from "../types";
+
+const KNOWN_GENERATED_DIRECTORIES = ["target", "node_modules", "dist", "build", "__pycache__", ".venv", ".godot"];
+const KNOWN_GENERATED_EXTENSIONS = [".class", ".jar", ".pyc", ".exe", ".msi", ".zip", ".tar", ".gz", ".7z"];
+
+/** Mirrors the generated-artifact detection in repoglance-core's scanner so a
+ * deleted artifact gets an ignore pattern that matches it wherever it
+ * reappears, instead of only its one exact path. */
+function suggestGitignorePattern(file: IssuePath): string | null {
+  const baseName = file.path.split("/").pop() ?? file.path;
+  const isDirectory = file.note?.toLowerCase().includes("directory") ?? false;
+
+  if (isDirectory) {
+    return KNOWN_GENERATED_DIRECTORIES.includes(baseName) ? `${baseName}/` : null;
+  }
+  if (baseName === ".DS_Store") return ".DS_Store";
+  const extension = baseName.includes(".") ? baseName.slice(baseName.lastIndexOf(".")) : "";
+  if (KNOWN_GENERATED_EXTENSIONS.includes(extension)) return `*${extension}`;
+  return file.path;
+}
 
 interface IssueDetailsPageProps {
   details: RepositoryDetails;
   issue: Issue;
   loading: boolean;
   onBack: () => void;
-  onDeletePath: (relativePath: string) => Promise<void>;
+  onDeletePath: (relativePath: string, gitignoreEntry?: string) => Promise<void>;
   onDeleteFromGitHistory: (relativePath: string) => Promise<void>;
   onForcePush: () => Promise<void>;
   onPreviewForcePush: () => Promise<string[]>;
@@ -48,14 +67,21 @@ export default function IssueDetailsPage({
     return currentlyExists ? "Current repository" : "Deleted from working tree";
   }
 
-  async function deletePath(relativePath: string) {
+  async function deletePath(file: IssuePath) {
     const confirmed = window.confirm(
-      `Delete this path from the working tree?\n\n${relativePath}\n\nThis cannot remove data from Git history.`
+      `Delete this path from the working tree?\n\n${file.path}\n\nThis cannot remove data from Git history.`
     );
+    if (!confirmed) return;
 
-    if (confirmed) {
-      await onDeletePath(relativePath);
+    let gitignoreEntry: string | undefined;
+    if (issue.category === "generated_artifact") {
+      const pattern = suggestGitignorePattern(file);
+      if (pattern && window.confirm(`Also add "${pattern}" to .gitignore so it isn't flagged again?`)) {
+        gitignoreEntry = pattern;
+      }
     }
+
+    await onDeletePath(file.path, gitignoreEntry);
   }
 
   function openDeleteOnGitDialog(relativePath: string) {
@@ -142,7 +168,7 @@ export default function IssueDetailsPage({
                     <em>{formatBytes(file.size)}</em>
                     {file.currently_exists ? (
                       <div className="buttonStack">
-                        <button className="dangerButton" onClick={() => deletePath(file.path)} disabled={loading}>
+                        <button className="dangerButton" onClick={() => deletePath(file)} disabled={loading}>
                           Delete
                         </button>
                         <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file.path)} disabled={loading}>

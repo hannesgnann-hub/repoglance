@@ -135,6 +135,29 @@ small {
   gap: 8px;
 }
 
+.historyList {
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.historyList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.historyList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.historyList::-webkit-scrollbar-thumb {
+  background: #d5d5cf;
+  border-radius: 3px;
+}
+
+.historyList::-webkit-scrollbar-thumb:hover {
+  background: #b7b7b0;
+}
+
 .projectRow {
   display: grid;
   grid-template-columns: minmax(210px, 1fr) 96px repeat(5, minmax(78px, 104px)) 18px;
