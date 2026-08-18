@@ -742,3 +742,62 @@ small {
     display: grid;
   }
 }
+
+.support-banner {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 9px 14px;
+  border-top: 1px solid #e9c96a;
+  color: #49380f;
+  background: #fff4c9;
+  box-shadow: 0 -4px 16px rgba(73, 56, 15, 0.08);
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.support-banner a {
+  color: #0f665f;
+  text-decoration: none;
+}
+
+.support-banner a:hover {
+  color: #0b514c;
+  text-decoration: underline;
+}
+
+.app-footer {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 14px;
+  padding-bottom: 42px;
+  color: #66736f;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.app-footer a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-footer a:hover {
+  color: #0f766e;
+  text-decoration: underline;
+}
+
+@media (max-width: 860px) {
+  .support-banner {
+    flex-direction: column;
+    gap: 3px;
+  }
+}

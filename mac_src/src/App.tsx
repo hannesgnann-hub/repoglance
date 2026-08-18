@@ -13,6 +13,7 @@ import {
   deleteRepositoryPaths,
   forcePushRepository,
   getRepositoryDetails,
+  getTotalBytesFreed,
   ignoreFindings,
   listIgnoredFindings,
   listRepositories,
@@ -35,6 +36,7 @@ export default function App() {
   const [repositories, setRepositories] = useState<RepositoryOverview[]>([]);
   const [details, setDetails] = useState<RepositoryDetails | null>(null);
   const [ignoredFindings, setIgnoredFindings] = useState<IgnoredFinding[]>([]);
+  const [totalBytesFreed, setTotalBytesFreed] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState("Working...");
   const [scanningRepositoryIds, setScanningRepositoryIds] = useState<number[]>([]);
@@ -60,6 +62,22 @@ export default function App() {
   );
   const loadingIndicator = loading ? <LoadingIndicator label={activeScan ? "Scanning..." : loadingLabel} /> : null;
 
+  const appFooter = (
+    <footer className="app-footer">
+      <a href="https://github.com/hannesgnann-hub/repoglance" target="_blank" rel="noreferrer">
+        © Hannes Gnann
+      </a>
+    </footer>
+  );
+  const supportBanner = (
+    <aside className="support-banner" aria-label="Support Repoglance">
+      <span>Support Repoglance development</span>
+      <a href="https://github.com/sponsors/hannesgnann-hub" target="_blank" rel="noreferrer">
+        Become a sponsor
+      </a>
+    </aside>
+  );
+
   async function refreshRepositories() {
     const next = await listRepositories();
     setRepositories(next);
@@ -73,6 +91,11 @@ export default function App() {
   async function refreshIgnoredFindings(repositoryId: number) {
     const next = await listIgnoredFindings(repositoryId);
     setIgnoredFindings(next);
+  }
+
+  async function refreshTotalBytesFreed() {
+    const next = await getTotalBytesFreed();
+    setTotalBytesFreed(next);
   }
 
   async function run(action: () => Promise<void>, label = "Working...") {
@@ -123,6 +146,7 @@ export default function App() {
 
   useEffect(() => {
     void run(refreshRepositories, "Loading projects...");
+    void refreshTotalBytesFreed();
   }, []);
 
   useEffect(() => {
@@ -148,21 +172,29 @@ export default function App() {
           issue={selectedIssue}
           loading={loading}
           onBack={() => setRoute({ name: "repository", id: route.repositoryId })}
-          onDeletePaths={(relativePaths, gitignoreEntries) =>
+          onDeletePaths={(relativePaths, gitignoreEntries, bytesFreed) =>
             run(async () => {
-              const next = await deleteRepositoryPaths(route.repositoryId, relativePaths, gitignoreEntries);
+              const next = await deleteRepositoryPaths(route.repositoryId, relativePaths, gitignoreEntries, bytesFreed);
               setDetails(next);
               await refreshRepositories();
+              await refreshTotalBytesFreed();
               const refreshedIssue = next.issues.find((issue) => issue.id === route.issueId);
               if (!refreshedIssue) {
                 setRoute({ name: "repository", id: route.repositoryId });
               }
             }, "Deleting paths...")
           }
-          onDeleteFromGitHistory={(relativePaths, gitignoreEntries) =>
+          onDeleteFromGitHistory={(relativePaths, gitignoreEntries, bytesFreed) =>
             runAndThrow(async () => {
-              await deletePathsFromGitHistory(route.repositoryId, relativePaths, "REWRITE HISTORY", gitignoreEntries);
+              await deletePathsFromGitHistory(
+                route.repositoryId,
+                relativePaths,
+                "REWRITE HISTORY",
+                gitignoreEntries,
+                bytesFreed
+              );
               await refreshRepositories();
+              await refreshTotalBytesFreed();
             }, "Deleting on Git...")
           }
           onIgnoreSelected={(relativePaths) =>
@@ -199,6 +231,8 @@ export default function App() {
           }
           onRunLongHistoryScan={() => run(() => scanAndRefresh(route.repositoryId, true), "Scanning...")}
         />
+        {appFooter}
+        {supportBanner}
       </>
     );
   }
@@ -223,6 +257,8 @@ export default function App() {
             }, "Un-ignoring...")
           }
         />
+        {appFooter}
+        {supportBanner}
       </>
     );
   }
@@ -257,6 +293,8 @@ export default function App() {
             }, "Scanning...")
           }
         />
+        {appFooter}
+        {supportBanner}
       </>
     );
   }
@@ -269,6 +307,7 @@ export default function App() {
         repositories={repositories}
         loading={loading}
         scanningRepositoryIds={scanningRepositoryIds}
+        totalBytesFreed={totalBytesFreed}
         error={error}
         onOpenRepository={(id) => setRoute({ name: "repository", id })}
         onAddPath={(path) =>
@@ -293,6 +332,8 @@ export default function App() {
           }, "Scanning repositories...")
         }
       />
+      {appFooter}
+      {supportBanner}
     </>
   );
 }

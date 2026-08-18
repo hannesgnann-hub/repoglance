@@ -192,6 +192,46 @@ impl Storage {
         .map_err(Into::into)
     }
 
+    /// Records a completed delete action (`kind` is `"working_tree"` or
+    /// `"git_history"`) so the total can be shown to the user later. Skips
+    /// zero-byte / zero-path events, since those aren't meaningful cleanups.
+    pub fn log_cleanup_event(
+        &self,
+        repository_id: i64,
+        repository_name: &str,
+        kind: &str,
+        path_count: i64,
+        bytes_freed: u64,
+    ) -> Result<()> {
+        if path_count <= 0 || bytes_freed == 0 {
+            return Ok(());
+        }
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO cleanup_events (repository_id, repository_name, kind, path_count, bytes_freed, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                repository_id,
+                repository_name,
+                kind,
+                path_count,
+                bytes_freed as i64,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn total_bytes_freed(&self) -> Result<u64> {
+        let conn = self.connection()?;
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(bytes_freed), 0) FROM cleanup_events",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total.max(0) as u64)
+    }
+
     pub fn save_scan(&self, scan: NewScan) -> Result<RepositoryDetails> {
         let mut conn = self.connection()?;
         let transaction = conn.transaction()?;
@@ -380,6 +420,7 @@ const MIGRATIONS: &[Migration] = &[
     migration_v1_initial_schema,
     migration_v2_add_security_score,
     migration_v3_add_ignored_findings,
+    migration_v4_add_cleanup_events,
 ];
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -467,6 +508,26 @@ fn migration_v3_add_ignored_findings(conn: &Connection) -> Result<()> {
             note TEXT,
             ignored_at TEXT NOT NULL,
             UNIQUE(repository_id, category, path)
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+/// No foreign key to `repositories` on purpose: this is a historical log of
+/// space actually freed, and should keep counting toward the running total
+/// even after a repository is later removed from tracking.
+fn migration_v4_add_cleanup_events(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS cleanup_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL,
+            repository_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path_count INTEGER NOT NULL,
+            bytes_freed INTEGER NOT NULL,
+            created_at TEXT NOT NULL
         );
         ",
     )?;
@@ -695,5 +756,29 @@ mod tests {
         assert_eq!(storage.details(repository.id).unwrap().ignored_count, 1);
 
         let _ = fs::remove_dir_all(&repo_dir);
+    }
+
+    #[test]
+    fn log_cleanup_event_accumulates_total_and_skips_empty_events() {
+        let path = temp_db_path("cleanup_events");
+        let _guard = TempDb(path.clone());
+        let storage = Storage::new(&path).unwrap();
+
+        storage
+            .log_cleanup_event(1, "repo-a", "working_tree", 3, 1_000)
+            .unwrap();
+        storage
+            .log_cleanup_event(1, "repo-a", "git_history", 1, 2_000)
+            .unwrap();
+        // A different repository still counts toward the same running total.
+        storage
+            .log_cleanup_event(2, "repo-b", "working_tree", 2, 500)
+            .unwrap();
+        // Zero-byte / zero-path events are not meaningful cleanups and
+        // should not be logged at all.
+        storage.log_cleanup_event(1, "repo-a", "working_tree", 0, 0).unwrap();
+        storage.log_cleanup_event(1, "repo-a", "working_tree", 5, 0).unwrap();
+
+        assert_eq!(storage.total_bytes_freed().unwrap(), 3_500);
     }
 }

@@ -220,6 +220,7 @@ async fn delete_repository_paths(
     repository_id: i64,
     relative_paths: Vec<String>,
     gitignore_entries: Vec<String>,
+    bytes_freed: u64,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
     if relative_paths.is_empty() {
@@ -250,6 +251,14 @@ async fn delete_repository_paths(
         add_gitignore_entries(&repository_root, &gitignore_entries)?;
     }
 
+    let _ = storage.log_cleanup_event(
+        repository_id,
+        &repository.name,
+        "working_tree",
+        relative_paths.len() as i64,
+        bytes_freed,
+    );
+
     let ignored = storage.ignored_findings_set(repository_id).map_err(to_message)?;
     let scan = scan_repository_path_with_options(
         repository_id,
@@ -268,6 +277,7 @@ async fn delete_paths_from_git_history(
     relative_paths: Vec<String>,
     confirmation: String,
     gitignore_entries: Vec<String>,
+    bytes_freed: u64,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
     if confirmation != "REWRITE HISTORY" {
@@ -298,6 +308,17 @@ async fn delete_paths_from_git_history(
         add_gitignore_entries(&repository_root, &gitignore_entries)?;
     }
 
+    {
+        let storage = state.storage.lock().map_err(|err| err.to_string())?;
+        let _ = storage.log_cleanup_event(
+            repository_id,
+            &repository.name,
+            "git_history",
+            relative_paths.len() as i64,
+            bytes_freed,
+        );
+    }
+
     scan_and_save(repository_id, false, &state)
 }
 
@@ -314,6 +335,14 @@ async fn force_push_repository(repository_id: i64, state: State<'_, AppState>) -
     run_git(&repository_root, &["push", "--force", "--all"])?;
     run_git(&repository_root, &["push", "--force", "--tags"])?;
     Ok(())
+}
+
+/// Total bytes freed across every repository via Delete / Delete on Git,
+/// for as long as this app installation has been tracking it.
+#[tauri::command]
+async fn total_bytes_freed(state: State<'_, AppState>) -> Result<u64, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    storage.total_bytes_freed().map_err(to_message)
 }
 
 /// Shows which refs a force push would actually change, using Git's own
@@ -408,6 +437,7 @@ fn main() {
             delete_paths_from_git_history,
             force_push_repository,
             preview_force_push,
+            total_bytes_freed,
             apply_gitignore_entries,
             ignore_findings,
             list_ignored_findings,

@@ -31,8 +31,8 @@ interface IssueDetailsPageProps {
   issue: Issue;
   loading: boolean;
   onBack: () => void;
-  onDeletePaths: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
-  onDeleteFromGitHistory: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
+  onDeletePaths: (relativePaths: string[], gitignoreEntries: string[], bytesFreed: number) => Promise<void>;
+  onDeleteFromGitHistory: (relativePaths: string[], gitignoreEntries: string[], bytesFreed: number) => Promise<void>;
   onIgnoreSelected: (relativePaths: string[]) => Promise<void>;
   onForcePush: () => Promise<void>;
   onPreviewForcePush: () => Promise<string[]>;
@@ -57,6 +57,7 @@ export default function IssueDetailsPage({
   const historySkipped = issue.category === "historical_large_file" && issue.title === "History scan skipped";
   const [gitDialog, setGitDialog] = useState<{
     paths: string[];
+    bytesFreed: number;
     step: "ready" | "deleted" | "pushed";
     error?: string | null;
     gitignorePatterns: string[];
@@ -122,9 +123,11 @@ export default function IssueDetailsPage({
       }
     }
 
+    const bytesFreed = selectedWorkingTreeFiles.reduce((sum, file) => sum + file.size, 0);
     await onDeletePaths(
       selectedWorkingTreeFiles.map((file) => file.path),
-      gitignoreEntries
+      gitignoreEntries,
+      bytesFreed
     );
     setSelectedPaths(new Set());
   }
@@ -145,6 +148,7 @@ export default function IssueDetailsPage({
     const gitignorePatterns = suggestGitignorePatterns(selectedFiles);
     setGitDialog({
       paths: selectedFiles.map((file) => file.path),
+      bytesFreed: selectedFiles.reduce((sum, file) => sum + file.size, 0),
       step: "ready",
       error: null,
       gitignorePatterns,
@@ -158,7 +162,7 @@ export default function IssueDetailsPage({
     try {
       setGitDialog({ ...gitDialog, error: null });
       const gitignoreEntries = gitDialog.addToGitignore ? gitDialog.gitignorePatterns : [];
-      await onDeleteFromGitHistory(gitDialog.paths, gitignoreEntries);
+      await onDeleteFromGitHistory(gitDialog.paths, gitignoreEntries, gitDialog.bytesFreed);
       const deletedPaths = gitDialog.paths;
       setHiddenGitDeletedPaths((paths) => {
         const next = new Set(paths);
