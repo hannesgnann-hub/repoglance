@@ -33,11 +33,17 @@ export function deleteRepositoryPath(repositoryId: number, relativePath: string,
   });
 }
 
-export function deletePathFromGitHistory(repositoryId: number, relativePath: string, confirmation: string) {
+export function deletePathFromGitHistory(
+  repositoryId: number,
+  relativePath: string,
+  confirmation: string,
+  gitignoreEntry?: string
+) {
   return invoke<RepositoryDetails>("delete_path_from_git_history", {
     repositoryId,
     relativePath,
-    confirmation
+    confirmation,
+    gitignoreEntry: gitignoreEntry ?? null
   });
 }
 

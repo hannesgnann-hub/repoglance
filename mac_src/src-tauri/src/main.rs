@@ -214,6 +214,7 @@ async fn delete_path_from_git_history(
     repository_id: i64,
     relative_path: String,
     confirmation: String,
+    gitignore_entry: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
     if confirmation != "REWRITE HISTORY" {
@@ -232,6 +233,10 @@ async fn delete_path_from_git_history(
 
     rewrite_history_remove_path(&repository_root, &relative_path)?;
     delete_existing_repository_path(&repository_root, &relative_path)?;
+
+    if let Some(entry) = gitignore_entry {
+        add_gitignore_entries(&repository_root, std::slice::from_ref(&entry))?;
+    }
 
     scan_and_save(repository_id, false, &state)
 }

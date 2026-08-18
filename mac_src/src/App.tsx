@@ -145,9 +145,9 @@ export default function App() {
               }
             }, "Deleting path...")
           }
-          onDeleteFromGitHistory={(relativePath) =>
+          onDeleteFromGitHistory={(relativePath, gitignoreEntry) =>
             runAndThrow(async () => {
-              await deletePathFromGitHistory(route.repositoryId, relativePath, "REWRITE HISTORY");
+              await deletePathFromGitHistory(route.repositoryId, relativePath, "REWRITE HISTORY", gitignoreEntry);
               await refreshRepositories();
             }, "Deleting on Git...")
           }

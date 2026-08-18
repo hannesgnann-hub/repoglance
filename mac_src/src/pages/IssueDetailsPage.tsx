@@ -27,7 +27,7 @@ interface IssueDetailsPageProps {
   loading: boolean;
   onBack: () => void;
   onDeletePath: (relativePath: string, gitignoreEntry?: string) => Promise<void>;
-  onDeleteFromGitHistory: (relativePath: string) => Promise<void>;
+  onDeleteFromGitHistory: (relativePath: string, gitignoreEntry?: string) => Promise<void>;
   onForcePush: () => Promise<void>;
   onPreviewForcePush: () => Promise<string[]>;
   onApplyGitignoreEntries: (entries: string[]) => Promise<void>;
@@ -52,6 +52,8 @@ export default function IssueDetailsPage({
     path: string;
     step: "ready" | "deleted" | "pushed";
     error?: string | null;
+    gitignorePattern: string | null;
+    addToGitignore: boolean;
   } | null>(null);
   const [hiddenGitDeletedPaths, setHiddenGitDeletedPaths] = useState<Set<string>>(new Set());
   const visibleAffectedPaths = issue.affected_paths.filter((file) => !hiddenGitDeletedPaths.has(file.path));
@@ -84,8 +86,15 @@ export default function IssueDetailsPage({
     await onDeletePath(file.path, gitignoreEntry);
   }
 
-  function openDeleteOnGitDialog(relativePath: string) {
-    setGitDialog({ path: relativePath, step: "ready", error: null });
+  function openDeleteOnGitDialog(file: IssuePath) {
+    const gitignorePattern = suggestGitignorePattern(file);
+    setGitDialog({
+      path: file.path,
+      step: "ready",
+      error: null,
+      gitignorePattern,
+      addToGitignore: gitignorePattern !== null
+    });
     setPushPreview({ loading: false, lines: [], error: null });
   }
 
@@ -93,7 +102,9 @@ export default function IssueDetailsPage({
     if (!gitDialog) return;
     try {
       setGitDialog({ ...gitDialog, error: null });
-      await onDeleteFromGitHistory(gitDialog.path);
+      const gitignoreEntry =
+        gitDialog.addToGitignore && gitDialog.gitignorePattern ? gitDialog.gitignorePattern : undefined;
+      await onDeleteFromGitHistory(gitDialog.path, gitignoreEntry);
       setHiddenGitDeletedPaths((paths) => new Set(paths).add(gitDialog.path));
       setGitDialog({ ...gitDialog, step: "deleted", error: null });
       void loadPushPreview();
@@ -171,13 +182,13 @@ export default function IssueDetailsPage({
                         <button className="dangerButton" onClick={() => deletePath(file)} disabled={loading}>
                           Delete
                         </button>
-                        <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file.path)} disabled={loading}>
+                        <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file)} disabled={loading}>
                           Delete on Git
                         </button>
                       </div>
                     ) : null}
                     {!file.currently_exists && issue.category === "historical_large_file" ? (
-                      <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file.path)} disabled={loading}>
+                      <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file)} disabled={loading}>
                         Delete on Git
                       </button>
                     ) : null}
@@ -238,8 +249,26 @@ export default function IssueDetailsPage({
                 <strong>1. Delete</strong>
                 <span>Rewrites local Git history, cleans `.git`, and removes the current checkout path.</span>
               </div>
+              {gitDialog.gitignorePattern ? (
+                <div className={gitDialog.step === "ready" ? "active" : ""}>
+                  <strong>2. Add to .gitignore</strong>
+                  <label className="dialogCheckbox">
+                    <input
+                      type="checkbox"
+                      checked={gitDialog.addToGitignore}
+                      disabled={gitDialog.step !== "ready" || loading}
+                      onChange={(event) =>
+                        setGitDialog({ ...gitDialog, addToGitignore: event.target.checked })
+                      }
+                    />
+                    <span>
+                      Also add <code>{gitDialog.gitignorePattern}</code> so it isn't flagged again.
+                    </span>
+                  </label>
+                </div>
+              ) : null}
               <div className={gitDialog.step === "deleted" || gitDialog.step === "pushed" ? "active" : ""}>
-                <strong>2. Force Push</strong>
+                <strong>{gitDialog.gitignorePattern ? "3." : "2."} Force Push</strong>
                 <span>Pushes the rewritten history to the remote so future clones shrink.</span>
               </div>
             </div>

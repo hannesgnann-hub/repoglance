@@ -502,6 +502,24 @@ small {
   background: #fff7f7;
 }
 
+.dialogCheckbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.dialogCheckbox input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.dialogCheckbox code {
+  background: #efefe9;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 .dialogError {
   padding: 12px;
   border: 1px solid #e3b6b6;
