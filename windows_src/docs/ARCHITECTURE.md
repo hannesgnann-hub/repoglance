@@ -1,11 +1,11 @@
-# Repoglance macOS Architecture
+# Repoglance Windows Architecture
 
-`mac_src` is the macOS source tree for the local Repoglance desktop app.
+`windows_src` is the Windows source tree for the local Repoglance desktop app.
 
 ## Layout
 
 ```text
-mac_src/
+windows_src/
 ├── crates/
 │   ├── repoglance-core/   # scanning, scoring, SQLite storage (pure Rust, no Tauri)
 │   └── repoglance-cli/    # thin debug CLI wrapper around repoglance-core
@@ -26,8 +26,8 @@ mac_src/
   logic; `main.rs` only orchestrates it and enforces path-safety checks
   before touching the filesystem or Git.
 - The local database lives at the OS app-data directory (e.g.
-  `~/Library/Application Support/dev.hannesgnann.repoglance/repoglance.sqlite3`
-  on macOS) and is created/migrated automatically on first launch.
+  `%APPDATA%\dev.hannesgnann.repoglance\repoglance.sqlite3` on Windows) and is
+  created/migrated automatically on first launch.
 
 ## Read vs. Write: What the App Actually Does
 
@@ -72,7 +72,8 @@ a few small, repository-independent logs:
 The only platform-conditional code in the whole app is
 `repoglance-core::scanner::fast_directory_size`, which shells out to `du -sk`
 on Unix (`#[cfg(unix)]`) and falls back to a plain recursive directory walk
-everywhere else. Every other part of the app - the scanner's `git`
+everywhere else - on Windows, that fallback path is always the one used.
+Every other part of the app - the scanner's `git`
 subprocess calls, the SQLite storage layer, the React frontend - is
 identical across the `mac_src`, `windows_src`, and `linux_src` source trees;
 only Tauri's bundler config (icons, installer target) differs per platform.

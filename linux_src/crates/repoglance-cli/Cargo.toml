@@ -1,0 +1,14 @@
+[package]
+name = "repoglance-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+repoglance-core = { path = "../repoglance-core" }
+
+[[bin]]
+name = "repoglance"
+path = "src/main.rs"

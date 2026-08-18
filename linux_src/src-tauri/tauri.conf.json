@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Repoglance",
+  "version": "0.1.0",
+  "identifier": "dev.hannesgnann.repoglance",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Repoglance",
+        "width": 1080,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 520
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage"],
+    "icon": ["icons/icon.png"],
+    "category": "Utility",
+    "copyright": "Copyright © Hannes Gnann",
+    "licenseFile": "../LICENSE",
+    "shortDescription": "Local Git repository health and cleanup dashboard.",
+    "longDescription": "Repoglance scans local Git repositories, stores scan history in its own SQLite database, and highlights cleanup and security issues that may deserve attention."
+  }
+}

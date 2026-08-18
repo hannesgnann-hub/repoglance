@@ -1,0 +1,21 @@
+[workspace]
+members = [
+  "crates/repoglance-core",
+  "crates/repoglance-cli",
+  "src-tauri"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Repoglance contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+walkdir = "2"
