@@ -25,25 +25,25 @@ export function getRepositoryDetails(id: number) {
   return invoke<RepositoryDetails>("get_repository_details", { id });
 }
 
-export function deleteRepositoryPath(repositoryId: number, relativePath: string, gitignoreEntry?: string) {
-  return invoke<RepositoryDetails>("delete_repository_path", {
+export function deleteRepositoryPaths(repositoryId: number, relativePaths: string[], gitignoreEntries: string[] = []) {
+  return invoke<RepositoryDetails>("delete_repository_paths", {
     repositoryId,
-    relativePath,
-    gitignoreEntry: gitignoreEntry ?? null
+    relativePaths,
+    gitignoreEntries
   });
 }
 
-export function deletePathFromGitHistory(
+export function deletePathsFromGitHistory(
   repositoryId: number,
-  relativePath: string,
+  relativePaths: string[],
   confirmation: string,
-  gitignoreEntry?: string
+  gitignoreEntries: string[] = []
 ) {
-  return invoke<RepositoryDetails>("delete_path_from_git_history", {
+  return invoke<RepositoryDetails>("delete_paths_from_git_history", {
     repositoryId,
-    relativePath,
+    relativePaths,
     confirmation,
-    gitignoreEntry: gitignoreEntry ?? null
+    gitignoreEntries
   });
 }
 

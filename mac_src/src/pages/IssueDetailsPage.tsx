@@ -21,13 +21,18 @@ function suggestGitignorePattern(file: IssuePath): string | null {
   return file.path;
 }
 
+function suggestGitignorePatterns(files: IssuePath[]): string[] {
+  const patterns = files.map(suggestGitignorePattern).filter((pattern): pattern is string => pattern !== null);
+  return Array.from(new Set(patterns));
+}
+
 interface IssueDetailsPageProps {
   details: RepositoryDetails;
   issue: Issue;
   loading: boolean;
   onBack: () => void;
-  onDeletePath: (relativePath: string, gitignoreEntry?: string) => Promise<void>;
-  onDeleteFromGitHistory: (relativePath: string, gitignoreEntry?: string) => Promise<void>;
+  onDeletePaths: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
+  onDeleteFromGitHistory: (relativePaths: string[], gitignoreEntries: string[]) => Promise<void>;
   onForcePush: () => Promise<void>;
   onPreviewForcePush: () => Promise<string[]>;
   onApplyGitignoreEntries: (entries: string[]) => Promise<void>;
@@ -39,7 +44,7 @@ export default function IssueDetailsPage({
   issue,
   loading,
   onBack,
-  onDeletePath,
+  onDeletePaths,
   onDeleteFromGitHistory,
   onForcePush,
   onPreviewForcePush,
@@ -49,10 +54,10 @@ export default function IssueDetailsPage({
   const gitignoreEntries = issue.category === "gitignore" ? issue.affected_paths.map((file) => file.path) : [];
   const historySkipped = issue.category === "historical_large_file" && issue.title === "History scan skipped";
   const [gitDialog, setGitDialog] = useState<{
-    path: string;
+    paths: string[];
     step: "ready" | "deleted" | "pushed";
     error?: string | null;
-    gitignorePattern: string | null;
+    gitignorePatterns: string[];
     addToGitignore: boolean;
   } | null>(null);
   const [hiddenGitDeletedPaths, setHiddenGitDeletedPaths] = useState<Set<string>>(new Set());
@@ -62,6 +67,7 @@ export default function IssueDetailsPage({
     lines: string[];
     error: string | null;
   }>({ loading: false, lines: [], error: null });
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
 
   function fileStateLabel(currentlyExists: boolean) {
     if (issue.category === "gitignore") return "Recommended entry";
@@ -69,31 +75,67 @@ export default function IssueDetailsPage({
     return currentlyExists ? "Current repository" : "Deleted from working tree";
   }
 
-  async function deletePath(file: IssuePath) {
+  // Only files a delete action actually applies to (working-tree delete, or
+  // Git-history delete for historical entries) can be selected at all.
+  function isSelectable(file: IssuePath): boolean {
+    return file.currently_exists || issue.category === "historical_large_file";
+  }
+
+  const selectableFiles = visibleAffectedPaths.filter(isSelectable);
+  const selectedFiles = selectableFiles.filter((file) => selectedPaths.has(file.path));
+  const selectedWorkingTreeFiles = selectedFiles.filter((file) => file.currently_exists);
+  const allSelected = selectableFiles.length > 0 && selectedFiles.length === selectableFiles.length;
+
+  function toggleSelected(path: string) {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedPaths(allSelected ? new Set() : new Set(selectableFiles.map((file) => file.path)));
+  }
+
+  async function deleteSelected() {
+    if (selectedWorkingTreeFiles.length === 0) return;
     const confirmed = window.confirm(
-      `Delete this path from the working tree?\n\n${file.path}\n\nThis cannot remove data from Git history.`
+      `Delete ${selectedWorkingTreeFiles.length} selected path(s) from the working tree?\n\nThis cannot remove data from Git history.`
     );
     if (!confirmed) return;
 
-    let gitignoreEntry: string | undefined;
+    let gitignoreEntries: string[] = [];
     if (issue.category === "generated_artifact") {
-      const pattern = suggestGitignorePattern(file);
-      if (pattern && window.confirm(`Also add "${pattern}" to .gitignore so it isn't flagged again?`)) {
-        gitignoreEntry = pattern;
+      const patterns = suggestGitignorePatterns(selectedWorkingTreeFiles);
+      if (
+        patterns.length > 0 &&
+        window.confirm(`Also add these ${patterns.length} pattern(s) to .gitignore so they aren't flagged again?\n\n${patterns.join("\n")}`)
+      ) {
+        gitignoreEntries = patterns;
       }
     }
 
-    await onDeletePath(file.path, gitignoreEntry);
+    await onDeletePaths(
+      selectedWorkingTreeFiles.map((file) => file.path),
+      gitignoreEntries
+    );
+    setSelectedPaths(new Set());
   }
 
-  function openDeleteOnGitDialog(file: IssuePath) {
-    const gitignorePattern = suggestGitignorePattern(file);
+  function openDeleteOnGitDialogForSelection() {
+    if (selectedFiles.length === 0) return;
+    const gitignorePatterns = suggestGitignorePatterns(selectedFiles);
     setGitDialog({
-      path: file.path,
+      paths: selectedFiles.map((file) => file.path),
       step: "ready",
       error: null,
-      gitignorePattern,
-      addToGitignore: gitignorePattern !== null
+      gitignorePatterns,
+      addToGitignore: gitignorePatterns.length > 0
     });
     setPushPreview({ loading: false, lines: [], error: null });
   }
@@ -102,10 +144,19 @@ export default function IssueDetailsPage({
     if (!gitDialog) return;
     try {
       setGitDialog({ ...gitDialog, error: null });
-      const gitignoreEntry =
-        gitDialog.addToGitignore && gitDialog.gitignorePattern ? gitDialog.gitignorePattern : undefined;
-      await onDeleteFromGitHistory(gitDialog.path, gitignoreEntry);
-      setHiddenGitDeletedPaths((paths) => new Set(paths).add(gitDialog.path));
+      const gitignoreEntries = gitDialog.addToGitignore ? gitDialog.gitignorePatterns : [];
+      await onDeleteFromGitHistory(gitDialog.paths, gitignoreEntries);
+      const deletedPaths = gitDialog.paths;
+      setHiddenGitDeletedPaths((paths) => {
+        const next = new Set(paths);
+        deletedPaths.forEach((path) => next.add(path));
+        return next;
+      });
+      setSelectedPaths((current) => {
+        const next = new Set(current);
+        deletedPaths.forEach((path) => next.delete(path));
+        return next;
+      });
       setGitDialog({ ...gitDialog, step: "deleted", error: null });
       void loadPushPreview();
     } catch (err) {
@@ -163,35 +214,58 @@ export default function IssueDetailsPage({
         </section>
 
         <section className="detailBlock">
-          <h2>Affected files</h2>
+          <div className="sectionHeader compact">
+            <h2>Affected files</h2>
+            {selectableFiles.length > 0 ? (
+              <label className="dialogCheckbox">
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} disabled={loading} />
+                <span>Select all</span>
+              </label>
+            ) : null}
+          </div>
+
+          {selectedFiles.length > 0 ? (
+            <div className="selectionBar">
+              <span>{selectedFiles.length} selected</span>
+              <button className="plainButton" onClick={() => setSelectedPaths(new Set())} disabled={loading}>
+                Clear
+              </button>
+              <button
+                className="dangerButton"
+                onClick={deleteSelected}
+                disabled={loading || selectedWorkingTreeFiles.length === 0}
+              >
+                Delete{selectedWorkingTreeFiles.length > 0 ? ` (${selectedWorkingTreeFiles.length})` : ""}
+              </button>
+              <button className="historyDangerButton" onClick={openDeleteOnGitDialogForSelection} disabled={loading}>
+                Delete on Git ({selectedFiles.length})
+              </button>
+            </div>
+          ) : null}
+
           <div className="fileList">
             {visibleAffectedPaths.length === 0 ? (
               <div className="emptyPanel">No remaining file paths recorded for this issue.</div>
             ) : (
               visibleAffectedPaths.map((file) => (
                 <div key={`${file.path}-${file.size}-${file.note ?? ""}`}>
-                  <div>
-                    <strong>{file.path}</strong>
-                    <span>{fileStateLabel(file.currently_exists)}</span>
-                    {file.note ? <small>{file.note}</small> : null}
+                  <div className="fileRowLabel">
+                    {isSelectable(file) ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedPaths.has(file.path)}
+                        onChange={() => toggleSelected(file.path)}
+                        disabled={loading}
+                      />
+                    ) : null}
+                    <div>
+                      <strong>{file.path}</strong>
+                      <span>{fileStateLabel(file.currently_exists)}</span>
+                      {file.note ? <small>{file.note}</small> : null}
+                    </div>
                   </div>
                   <div className="fileActions">
                     <em>{formatBytes(file.size)}</em>
-                    {file.currently_exists ? (
-                      <div className="buttonStack">
-                        <button className="dangerButton" onClick={() => deletePath(file)} disabled={loading}>
-                          Delete
-                        </button>
-                        <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file)} disabled={loading}>
-                          Delete on Git
-                        </button>
-                      </div>
-                    ) : null}
-                    {!file.currently_exists && issue.category === "historical_large_file" ? (
-                      <button className="historyDangerButton" onClick={() => openDeleteOnGitDialog(file)} disabled={loading}>
-                        Delete on Git
-                      </button>
-                    ) : null}
                   </div>
                 </div>
               ))
@@ -223,8 +297,9 @@ export default function IssueDetailsPage({
           <h2>Recommendation</h2>
           <p>
             Delete removes current working-tree files or directories only. Delete on Git removes the
-            selected path from Git history with a clean worktree requirement, then runs Git cleanup.
-            After Force Push, future clones can become smaller.
+            selected paths from Git history with a clean worktree requirement, then runs Git cleanup.
+            After Force Push, future clones can become smaller. Select one or more files above to act on
+            all of them at once.
           </p>
         </section>
       </main>
@@ -240,16 +315,22 @@ export default function IssueDetailsPage({
             </header>
 
             <div className="dialogPath">
-              <span>Path</span>
-              <strong>{gitDialog.path}</strong>
+              <span>{gitDialog.paths.length === 1 ? "Path" : `${gitDialog.paths.length} paths`}</span>
+              <ul className="dialogPathList">
+                {gitDialog.paths.map((path) => (
+                  <li key={path}>
+                    <strong>{path}</strong>
+                  </li>
+                ))}
+              </ul>
             </div>
 
             <div className="dialogSteps">
               <div className={gitDialog.step === "ready" ? "active" : ""}>
                 <strong>1. Delete</strong>
-                <span>Rewrites local Git history, cleans `.git`, and removes the current checkout path.</span>
+                <span>Rewrites local Git history, cleans `.git`, and removes the current checkout path(s).</span>
               </div>
-              {gitDialog.gitignorePattern ? (
+              {gitDialog.gitignorePatterns.length > 0 ? (
                 <div className={gitDialog.step === "ready" ? "active" : ""}>
                   <strong>2. Add to .gitignore</strong>
                   <label className="dialogCheckbox">
@@ -262,13 +343,19 @@ export default function IssueDetailsPage({
                       }
                     />
                     <span>
-                      Also add <code>{gitDialog.gitignorePattern}</code> so it isn't flagged again.
+                      Also add {gitDialog.gitignorePatterns.length} pattern(s) so they aren't flagged again:{" "}
+                      {gitDialog.gitignorePatterns.map((pattern, index) => (
+                        <span key={pattern}>
+                          {index > 0 ? ", " : ""}
+                          <code>{pattern}</code>
+                        </span>
+                      ))}
                     </span>
                   </label>
                 </div>
               ) : null}
               <div className={gitDialog.step === "deleted" || gitDialog.step === "pushed" ? "active" : ""}>
-                <strong>{gitDialog.gitignorePattern ? "3." : "2."} Force Push</strong>
+                <strong>{gitDialog.gitignorePatterns.length > 0 ? "3." : "2."} Force Push</strong>
                 <span>Pushes the rewritten history to the remote so future clones shrink.</span>
               </div>
             </div>

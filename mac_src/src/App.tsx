@@ -8,8 +8,8 @@ import {
   addRepository,
   applyGitignoreEntries,
   cancelScan,
-  deletePathFromGitHistory,
-  deleteRepositoryPath,
+  deletePathsFromGitHistory,
+  deleteRepositoryPaths,
   forcePushRepository,
   getRepositoryDetails,
   listRepositories,
@@ -134,20 +134,20 @@ export default function App() {
           issue={selectedIssue}
           loading={loading}
           onBack={() => setRoute({ name: "repository", id: route.repositoryId })}
-          onDeletePath={(relativePath, gitignoreEntry) =>
+          onDeletePaths={(relativePaths, gitignoreEntries) =>
             run(async () => {
-              const next = await deleteRepositoryPath(route.repositoryId, relativePath, gitignoreEntry);
+              const next = await deleteRepositoryPaths(route.repositoryId, relativePaths, gitignoreEntries);
               setDetails(next);
               await refreshRepositories();
               const refreshedIssue = next.issues.find((issue) => issue.id === route.issueId);
               if (!refreshedIssue) {
                 setRoute({ name: "repository", id: route.repositoryId });
               }
-            }, "Deleting path...")
+            }, "Deleting paths...")
           }
-          onDeleteFromGitHistory={(relativePath, gitignoreEntry) =>
+          onDeleteFromGitHistory={(relativePaths, gitignoreEntries) =>
             runAndThrow(async () => {
-              await deletePathFromGitHistory(route.repositoryId, relativePath, "REWRITE HISTORY", gitignoreEntry);
+              await deletePathsFromGitHistory(route.repositoryId, relativePaths, "REWRITE HISTORY", gitignoreEntries);
               await refreshRepositories();
             }, "Deleting on Git...")
           }

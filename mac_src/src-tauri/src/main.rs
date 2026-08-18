@@ -171,32 +171,38 @@ async fn scan_all_repositories(state: State<'_, AppState>) -> Result<Vec<Reposit
 }
 
 #[tauri::command]
-async fn delete_repository_path(
+async fn delete_repository_paths(
     repository_id: i64,
-    relative_path: String,
-    gitignore_entry: Option<String>,
+    relative_paths: Vec<String>,
+    gitignore_entries: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
+    if relative_paths.is_empty() {
+        return Err("No paths were selected.".into());
+    }
+
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     let repository = storage.repository(repository_id).map_err(to_message)?;
     let repository_root = Path::new(&repository.path)
         .canonicalize()
         .map_err(|err| format!("Repository path could not be resolved: {err}"))?;
-    let target = resolve_deletable_path(&repository_root, &relative_path)?;
 
-    let metadata = fs::symlink_metadata(&target)
-        .map_err(|err| format!("{} could not be inspected: {err}", target.display()))?;
+    for relative_path in &relative_paths {
+        let target = resolve_deletable_path(&repository_root, relative_path)?;
+        let metadata = fs::symlink_metadata(&target)
+            .map_err(|err| format!("{} could not be inspected: {err}", target.display()))?;
 
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(&target)
-            .map_err(|err| format!("{} could not be deleted: {err}", target.display()))?;
-    } else {
-        fs::remove_file(&target)
-            .map_err(|err| format!("{} could not be deleted: {err}", target.display()))?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(&target)
+                .map_err(|err| format!("{} could not be deleted: {err}", target.display()))?;
+        } else {
+            fs::remove_file(&target)
+                .map_err(|err| format!("{} could not be deleted: {err}", target.display()))?;
+        }
     }
 
-    if let Some(entry) = gitignore_entry {
-        add_gitignore_entries(&repository_root, std::slice::from_ref(&entry))?;
+    if !gitignore_entries.is_empty() {
+        add_gitignore_entries(&repository_root, &gitignore_entries)?;
     }
 
     let scan = scan_repository_path_with_options(
@@ -210,15 +216,18 @@ async fn delete_repository_path(
 }
 
 #[tauri::command]
-async fn delete_path_from_git_history(
+async fn delete_paths_from_git_history(
     repository_id: i64,
-    relative_path: String,
+    relative_paths: Vec<String>,
     confirmation: String,
-    gitignore_entry: Option<String>,
+    gitignore_entries: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<RepositoryDetails, String> {
     if confirmation != "REWRITE HISTORY" {
         return Err("History rewrite confirmation did not match.".into());
+    }
+    if relative_paths.is_empty() {
+        return Err("No paths were selected.".into());
     }
 
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
@@ -228,14 +237,18 @@ async fn delete_path_from_git_history(
     let repository_root = Path::new(&repository.path)
         .canonicalize()
         .map_err(|err| format!("Repository path could not be resolved: {err}"))?;
-    validate_relative_git_path(&relative_path)?;
+    for relative_path in &relative_paths {
+        validate_relative_git_path(relative_path)?;
+    }
     ensure_clean_worktree(&repository_root)?;
 
-    rewrite_history_remove_path(&repository_root, &relative_path)?;
-    delete_existing_repository_path(&repository_root, &relative_path)?;
+    rewrite_history_remove_paths(&repository_root, &relative_paths)?;
+    for relative_path in &relative_paths {
+        delete_existing_repository_path(&repository_root, relative_path)?;
+    }
 
-    if let Some(entry) = gitignore_entry {
-        add_gitignore_entries(&repository_root, std::slice::from_ref(&entry))?;
+    if !gitignore_entries.is_empty() {
+        add_gitignore_entries(&repository_root, &gitignore_entries)?;
     }
 
     scan_and_save(repository_id, false, &state)
@@ -344,8 +357,8 @@ fn main() {
             scan_repository,
             scan_all_repositories,
             get_repository_details,
-            delete_repository_path,
-            delete_path_from_git_history,
+            delete_repository_paths,
+            delete_paths_from_git_history,
             force_push_repository,
             preview_force_push,
             apply_gitignore_entries,
@@ -457,33 +470,32 @@ fn history_rewrite_tool_available() -> bool {
         .unwrap_or(false)
 }
 
-fn rewrite_history_remove_path(repository_root: &Path, relative_path: &str) -> Result<(), String> {
+fn rewrite_history_remove_paths(repository_root: &Path, relative_paths: &[String]) -> Result<(), String> {
     if history_rewrite_tool_available() {
-        rewrite_history_with_filter_repo(repository_root, relative_path)
+        rewrite_history_with_filter_repo(repository_root, relative_paths)
     } else {
-        rewrite_history_with_filter_branch(repository_root, relative_path)
+        rewrite_history_with_filter_branch(repository_root, relative_paths)
     }
 }
 
 fn rewrite_history_with_filter_repo(
     repository_root: &Path,
-    relative_path: &str,
+    relative_paths: &[String],
 ) -> Result<(), String> {
     let origin_url = run_git_capture(repository_root, &["remote", "get-url", "origin"])
         .ok()
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty());
 
-    run_git(
-        repository_root,
-        &[
-            "filter-repo",
-            "--force",
-            "--invert-paths",
-            "--path",
-            relative_path,
-        ],
-    )?;
+    // A single filter-repo run over all paths is both correct (it rewrites
+    // history once) and far cheaper than running it once per path, which
+    // would re-walk and rewrite the *entire* history N times.
+    let mut args: Vec<&str> = vec!["filter-repo", "--force", "--invert-paths"];
+    for path in relative_paths {
+        args.push("--path");
+        args.push(path);
+    }
+    run_git(repository_root, &args)?;
 
     // git-filter-repo removes the `origin` remote by default as a guard
     // against accidentally pushing rewritten history back to where it came
@@ -502,10 +514,14 @@ fn rewrite_history_with_filter_repo(
 
 fn rewrite_history_with_filter_branch(
     repository_root: &Path,
-    relative_path: &str,
+    relative_paths: &[String],
 ) -> Result<(), String> {
-    let quoted_path = shell_quote(relative_path);
-    let index_filter = format!("git rm -r --cached --ignore-unmatch -- {quoted_path}");
+    let quoted_paths = relative_paths
+        .iter()
+        .map(|path| shell_quote(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let index_filter = format!("git rm -r --cached --ignore-unmatch -- {quoted_paths}");
     run_git(
         repository_root,
         &[
