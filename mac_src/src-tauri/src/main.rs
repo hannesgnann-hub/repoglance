@@ -217,29 +217,7 @@ fn delete_path_from_git_history(
     validate_relative_git_path(&relative_path)?;
     ensure_clean_worktree(&repository_root)?;
 
-    let quoted_path = shell_quote(&relative_path);
-    let index_filter = format!("git rm -r --cached --ignore-unmatch -- {quoted_path}");
-    run_git(
-        &repository_root,
-        &[
-            "filter-branch",
-            "--force",
-            "--index-filter",
-            &index_filter,
-            "--prune-empty",
-            "--tag-name-filter",
-            "cat",
-            "--",
-            "--all",
-        ],
-    )?;
-
-    cleanup_rewritten_refs(&repository_root)?;
-    run_git(
-        &repository_root,
-        &["reflog", "expire", "--expire=now", "--all"],
-    )?;
-    run_git(&repository_root, &["gc", "--prune=now", "--aggressive"])?;
+    rewrite_history_remove_path(&repository_root, &relative_path)?;
     delete_existing_repository_path(&repository_root, &relative_path)?;
 
     scan_and_save(repository_id, false, &state)
@@ -383,6 +361,91 @@ fn ensure_clean_worktree(repository_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns true if `git-filter-repo` is installed and usable. It is the tool
+/// upstream Git recommends over `filter-branch` (faster, far less prone to
+/// leaving stray refs or partially-rewritten history around), so it is
+/// preferred whenever it is available.
+fn history_rewrite_tool_available() -> bool {
+    Command::new("git")
+        .args(["filter-repo", "--version"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn rewrite_history_remove_path(repository_root: &Path, relative_path: &str) -> Result<(), String> {
+    if history_rewrite_tool_available() {
+        rewrite_history_with_filter_repo(repository_root, relative_path)
+    } else {
+        rewrite_history_with_filter_branch(repository_root, relative_path)
+    }
+}
+
+fn rewrite_history_with_filter_repo(
+    repository_root: &Path,
+    relative_path: &str,
+) -> Result<(), String> {
+    let origin_url = run_git_capture(repository_root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty());
+
+    run_git(
+        repository_root,
+        &[
+            "filter-repo",
+            "--force",
+            "--invert-paths",
+            "--path",
+            relative_path,
+        ],
+    )?;
+
+    // git-filter-repo removes the `origin` remote by default as a guard
+    // against accidentally pushing rewritten history back to where it came
+    // from. Repoglance's flow is an explicit, user-confirmed rewrite followed
+    // by an explicit force push, so restore it if it was there before.
+    if let Some(url) = origin_url {
+        let remotes = run_git_capture(repository_root, &["remote"]).unwrap_or_default();
+        let has_origin = remotes.lines().any(|line| line.trim() == "origin");
+        if !has_origin {
+            run_git(repository_root, &["remote", "add", "origin", &url])?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rewrite_history_with_filter_branch(
+    repository_root: &Path,
+    relative_path: &str,
+) -> Result<(), String> {
+    let quoted_path = shell_quote(relative_path);
+    let index_filter = format!("git rm -r --cached --ignore-unmatch -- {quoted_path}");
+    run_git(
+        repository_root,
+        &[
+            "filter-branch",
+            "--force",
+            "--index-filter",
+            &index_filter,
+            "--prune-empty",
+            "--tag-name-filter",
+            "cat",
+            "--",
+            "--all",
+        ],
+    )?;
+
+    cleanup_rewritten_refs(repository_root)?;
+    run_git(
+        repository_root,
+        &["reflog", "expire", "--expire=now", "--all"],
+    )?;
+    run_git(repository_root, &["gc", "--prune=now", "--aggressive"])?;
+    Ok(())
+}
+
 fn cleanup_rewritten_refs(repository_root: &Path) -> Result<(), String> {
     let output = Command::new("git")
         .current_dir(repository_root)
@@ -402,6 +465,10 @@ fn cleanup_rewritten_refs(repository_root: &Path) -> Result<(), String> {
 }
 
 fn run_git(repository_root: &Path, args: &[&str]) -> Result<(), String> {
+    run_git_capture(repository_root, args).map(|_| ())
+}
+
+fn run_git_capture(repository_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .current_dir(repository_root)
         .env("FILTER_BRANCH_SQUELCH_WARNING", "1")
@@ -414,7 +481,7 @@ fn run_git(repository_root: &Path, args: &[&str]) -> Result<(), String> {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Err(if stderr.is_empty() { stdout } else { stderr });
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn shell_quote(value: &str) -> String {
