@@ -420,3 +420,90 @@ fn run_git(repository_root: &Path, args: &[&str]) -> Result<(), String> {
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "repoglance_main_test_{name}_{}_{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.canonicalize().unwrap()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn validate_relative_git_path_rejects_empty_and_absolute() {
+        assert!(validate_relative_git_path("").is_err());
+        assert!(validate_relative_git_path("   ").is_err());
+        assert!(validate_relative_git_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_relative_git_path_rejects_parent_dir_traversal() {
+        assert!(validate_relative_git_path("../outside").is_err());
+        assert!(validate_relative_git_path("nested/../../outside").is_err());
+    }
+
+    #[test]
+    fn validate_relative_git_path_rejects_dot_git_component() {
+        assert!(validate_relative_git_path(".git/config").is_err());
+        assert!(validate_relative_git_path("sub/.git/hooks/pre-commit").is_err());
+    }
+
+    #[test]
+    fn validate_relative_git_path_accepts_normal_relative_paths() {
+        assert!(validate_relative_git_path("src/main.rs").is_ok());
+        assert!(validate_relative_git_path("large-file.bin").is_ok());
+    }
+
+    #[test]
+    fn resolve_deletable_path_accepts_file_inside_repository() {
+        let repo = TempDir::new("inside");
+        fs::write(repo.0.join("keep.txt"), b"data").unwrap();
+
+        let resolved = resolve_deletable_path(&repo.path(), "keep.txt").unwrap();
+        assert_eq!(resolved, repo.path().join("keep.txt"));
+    }
+
+    #[test]
+    fn resolve_deletable_path_rejects_traversal_before_touching_disk() {
+        let repo = TempDir::new("traversal");
+        let err = resolve_deletable_path(&repo.path(), "../secret.txt").unwrap_err();
+        assert!(err.contains("traversal"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_deletable_path_rejects_symlink_escaping_repository() {
+        use std::os::unix::fs::symlink;
+
+        let repo = TempDir::new("symlink-repo");
+        let outside = TempDir::new("symlink-outside");
+        fs::write(outside.0.join("target.txt"), b"secret").unwrap();
+        symlink(outside.path().join("target.txt"), repo.0.join("escape")).unwrap();
+
+        let err = resolve_deletable_path(&repo.path(), "escape").unwrap_err();
+        assert!(err.contains("outside the repository"));
+    }
+}
