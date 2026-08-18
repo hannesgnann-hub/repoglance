@@ -160,7 +160,7 @@ small {
 
 .projectRow {
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) 96px repeat(5, minmax(78px, 104px)) 18px;
+  grid-template-columns: 22px minmax(210px, 1fr) 96px repeat(5, minmax(78px, 104px)) 18px;
   align-items: center;
   gap: 16px;
   width: 100%;
@@ -169,7 +169,28 @@ small {
   text-align: left;
   color: inherit;
   background: #fff;
-  border-color: #deded8;
+  border: 1px solid #deded8;
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.starButton {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #c7c7bd;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.starButton:hover {
+  color: #d8a53d;
+}
+
+.starButton.isFavorite {
+  color: #e0a626;
 }
 
 .projectRow:hover,

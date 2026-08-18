@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import ExternalLink from "./components/ExternalLink";
 import LoadingIndicator from "./components/LoadingIndicator";
 import ScanProgress from "./components/ScanProgress";
 import Dashboard from "./pages/Dashboard";
@@ -19,6 +20,7 @@ import {
   listRepositories,
   previewForcePush,
   removeRepository,
+  setFavorite,
   scanAllRepositories,
   scanRepository,
   unignoreFinding
@@ -64,17 +66,13 @@ export default function App() {
 
   const appFooter = (
     <footer className="app-footer">
-      <a href="https://github.com/hannesgnann-hub/repoglance" target="_blank" rel="noreferrer">
-        © Hannes Gnann
-      </a>
+      <ExternalLink href="https://github.com/hannesgnann-hub/repoglance">© Hannes Gnann</ExternalLink>
     </footer>
   );
   const supportBanner = (
     <aside className="support-banner" aria-label="Support Repoglance">
       <span>Support Repoglance development</span>
-      <a href="https://github.com/sponsors/hannesgnann-hub" target="_blank" rel="noreferrer">
-        Become a sponsor
-      </a>
+      <ExternalLink href="https://github.com/sponsors/hannesgnann-hub">Become a sponsor</ExternalLink>
     </aside>
   );
 
@@ -310,6 +308,12 @@ export default function App() {
         totalBytesFreed={totalBytesFreed}
         error={error}
         onOpenRepository={(id) => setRoute({ name: "repository", id })}
+        onToggleFavorite={(id, favorite) =>
+          run(async () => {
+            const next = await setFavorite(id, favorite);
+            setRepositories(next);
+          }, "Updating favorite...")
+        }
         onAddPath={(path) =>
           run(async () => {
             const repository = await addRepository(path);

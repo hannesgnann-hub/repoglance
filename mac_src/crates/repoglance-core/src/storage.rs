@@ -75,7 +75,8 @@ impl Storage {
     pub fn repositories(&self) -> Result<Vec<RepositoryOverview>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, added_at, last_scan_at FROM repositories ORDER BY name COLLATE NOCASE",
+            "SELECT id, name, path, added_at, last_scan_at, favorite FROM repositories
+             ORDER BY favorite DESC, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(RepositoryOverview {
@@ -84,6 +85,7 @@ impl Storage {
                 path: row.get(2)?,
                 added_at: row.get(3)?,
                 last_scan_at: row.get(4)?,
+                favorite: row.get(5)?,
                 missing: false,
                 latest_scan: None,
             })
@@ -97,6 +99,15 @@ impl Storage {
             repositories.push(repository);
         }
         Ok(repositories)
+    }
+
+    pub fn set_favorite(&self, id: i64, favorite: bool) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE repositories SET favorite = ?1 WHERE id = ?2",
+            params![favorite, id],
+        )?;
+        Ok(())
     }
 
     pub fn repository(&self, id: i64) -> Result<RepositoryOverview> {
@@ -421,6 +432,7 @@ const MIGRATIONS: &[Migration] = &[
     migration_v2_add_security_score,
     migration_v3_add_ignored_findings,
     migration_v4_add_cleanup_events,
+    migration_v5_add_favorite,
 ];
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -532,6 +544,10 @@ fn migration_v4_add_cleanup_events(conn: &Connection) -> Result<()> {
         ",
     )?;
     Ok(())
+}
+
+fn migration_v5_add_favorite(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "repositories", "favorite", "INTEGER NOT NULL DEFAULT 0")
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
@@ -780,5 +796,49 @@ mod tests {
         storage.log_cleanup_event(1, "repo-a", "working_tree", 5, 0).unwrap();
 
         assert_eq!(storage.total_bytes_freed().unwrap(), 3_500);
+    }
+
+    #[test]
+    fn favorites_are_sorted_before_non_favorites() {
+        let path = temp_db_path("favorites");
+        let _guard = TempDb(path.clone());
+        let storage = Storage::new(&path).unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "repoglance_test_favorites_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dirs: Vec<PathBuf> = ["zzz-repo", "aaa-repo", "mmm-repo"]
+            .iter()
+            .map(|name| {
+                let dir = parent.join(name);
+                fs::create_dir_all(dir.join(".git")).unwrap();
+                dir
+            })
+            .collect();
+
+        let mut ids = Vec::new();
+        for dir in &dirs {
+            ids.push(storage.add_repository(dir).unwrap().id);
+        }
+
+        // Without any favorites, alphabetical order applies.
+        let names: Vec<String> = storage.repositories().unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["aaa-repo", "mmm-repo", "zzz-repo"]);
+
+        // Favoriting "zzz-repo" should move it to the front, ahead of the
+        // alphabetically-earlier non-favorites.
+        storage.set_favorite(ids[0], true).unwrap();
+        let repositories = storage.repositories().unwrap();
+        assert_eq!(repositories[0].name, "zzz-repo");
+        assert!(repositories[0].favorite);
+        assert!(!repositories[1].favorite);
+
+        storage.set_favorite(ids[0], false).unwrap();
+        let names: Vec<String> = storage.repositories().unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["aaa-repo", "mmm-repo", "zzz-repo"]);
+
+        let _ = fs::remove_dir_all(&parent);
     }
 }

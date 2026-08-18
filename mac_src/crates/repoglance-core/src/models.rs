@@ -7,6 +7,7 @@ pub struct RepositoryOverview {
     pub path: String,
     pub added_at: String,
     pub last_scan_at: Option<String>,
+    pub favorite: bool,
     pub missing: bool,
     pub latest_scan: Option<ScanSummary>,
 }

@@ -57,6 +57,7 @@ export interface RepositoryOverview {
   path: string;
   added_at: string;
   last_scan_at?: string | null;
+  favorite: boolean;
   missing: boolean;
   latest_scan?: ScanSummary | null;
 }

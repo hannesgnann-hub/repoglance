@@ -13,6 +13,10 @@ export function removeRepository(id: number) {
   return invoke<void>("remove_repository", { id });
 }
 
+export function setFavorite(id: number, favorite: boolean) {
+  return invoke<RepositoryOverview[]>("set_favorite", { id, favorite });
+}
+
 export function scanRepository(id: number, deepHistory = false) {
   return invoke<RepositoryDetails>("scan_repository", { id, deepHistory });
 }

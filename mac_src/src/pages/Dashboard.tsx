@@ -12,6 +12,7 @@ interface DashboardProps {
   onAddPath: (path: string) => Promise<void>;
   onScanAll: () => Promise<void>;
   onOpenRepository: (id: number) => void;
+  onToggleFavorite: (id: number, favorite: boolean) => Promise<void>;
 }
 
 export default function Dashboard({
@@ -22,7 +23,8 @@ export default function Dashboard({
   error,
   onAddPath,
   onScanAll,
-  onOpenRepository
+  onOpenRepository,
+  onToggleFavorite
 }: DashboardProps) {
   const scannedRepositories = repositories.filter((repository) => repository.latest_scan);
   const totalSize = scannedRepositories.reduce(
@@ -119,6 +121,7 @@ export default function Dashboard({
               repository={repository}
               scanning={scanningRepositoryIds.includes(repository.id)}
               onOpen={() => onOpenRepository(repository.id)}
+              onToggleFavorite={() => onToggleFavorite(repository.id, !repository.favorite)}
             />
           ))}
         </div>

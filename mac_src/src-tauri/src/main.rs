@@ -31,6 +31,17 @@ async fn remove_repository(id: i64, state: State<'_, AppState>) -> Result<(), St
 }
 
 #[tauri::command]
+async fn set_favorite(
+    id: i64,
+    favorite: bool,
+    state: State<'_, AppState>,
+) -> Result<Vec<RepositoryOverview>, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    storage.set_favorite(id, favorite).map_err(to_message)?;
+    storage.repositories().map_err(to_message)
+}
+
+#[tauri::command]
 async fn list_repositories(state: State<'_, AppState>) -> Result<Vec<RepositoryOverview>, String> {
     let storage = state.storage.lock().map_err(|err| err.to_string())?;
     storage.repositories().map_err(to_message)
@@ -413,6 +424,7 @@ fn parse_push_porcelain(output: &str) -> Vec<String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let db_path = database_path(app)?;
             let storage = Storage::new(db_path).map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -429,6 +441,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             add_repository,
             remove_repository,
+            set_favorite,
             list_repositories,
             scan_repository,
             scan_all_repositories,
