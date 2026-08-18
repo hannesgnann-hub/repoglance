@@ -492,6 +492,32 @@ small {
   font-weight: 700;
 }
 
+.dialogPreview {
+  padding: 12px;
+  border: 1px solid #deded8;
+  border-radius: 7px;
+  background: #fbfbfa;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.dialogPreview strong {
+  font-size: 12px;
+}
+
+.dialogPreview ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.dialogPreview p {
+  margin: 0;
+  color: #666a6d;
+}
+
 .actionBlock {
   justify-items: start;
 }

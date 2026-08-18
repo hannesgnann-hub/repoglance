@@ -238,6 +238,71 @@ fn force_push_repository(repository_id: i64, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
+/// Shows which refs a force push would actually change, using Git's own
+/// `--dry-run --porcelain` push (no history is touched) so the user sees
+/// what they are about to overwrite before confirming a destructive push.
+#[tauri::command]
+fn preview_force_push(repository_id: i64, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let storage = state.storage.lock().map_err(|err| err.to_string())?;
+    let repository = storage.repository(repository_id).map_err(to_message)?;
+    drop(storage);
+
+    let repository_root = Path::new(&repository.path)
+        .canonicalize()
+        .map_err(|err| format!("Repository path could not be resolved: {err}"))?;
+
+    let mut lines = Vec::new();
+    lines.extend(dry_run_force_push_lines(&repository_root, "--all")?);
+    lines.extend(dry_run_force_push_lines(&repository_root, "--tags")?);
+    Ok(lines)
+}
+
+fn dry_run_force_push_lines(repository_root: &Path, scope: &str) -> Result<Vec<String>, String> {
+    let output = run_git_capture(
+        repository_root,
+        &["push", "--force", "--dry-run", "--porcelain", scope],
+    )?;
+    Ok(parse_push_porcelain(&output))
+}
+
+/// Turns `git push --porcelain` ref lines (`<flag>\t<from>:<to>\t<summary>`)
+/// into short human-readable descriptions, dropping the header/footer lines
+/// and refs that would not actually change.
+fn parse_push_porcelain(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|raw_line| {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("To ") || line == "Done" {
+                return None;
+            }
+
+            let mut columns = line.splitn(3, '\t');
+            let flag = columns.next().unwrap_or("").trim();
+            let refs = columns.next().unwrap_or("").trim();
+            let summary = columns.next().unwrap_or("").trim();
+            if refs.is_empty() {
+                return None;
+            }
+
+            let description = match flag {
+                "=" => return None,
+                "+" => "will be force-updated",
+                "*" => "will be created",
+                "-" => "will be deleted",
+                "!" => "rejected",
+                _ => "will be updated",
+            };
+            let suffix = if summary.is_empty() {
+                String::new()
+            } else {
+                format!(" ({summary})")
+            };
+            Some(format!("{refs} — {description}{suffix}"))
+        })
+        .collect()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -264,6 +329,7 @@ fn main() {
             delete_repository_path,
             delete_path_from_git_history,
             force_push_repository,
+            preview_force_push,
             apply_gitignore_entries,
             cancel_scan
         ])
@@ -558,6 +624,23 @@ mod tests {
         let repo = TempDir::new("traversal");
         let err = resolve_deletable_path(&repo.path(), "../secret.txt").unwrap_err();
         assert!(err.contains("traversal"));
+    }
+
+    #[test]
+    fn parse_push_porcelain_describes_changed_refs_and_drops_noise() {
+        let output = "To git@example.com:acme/repo.git\n\
++\trefs/heads/main:refs/heads/main\tforced update\n\
+=\trefs/heads/stable:refs/heads/stable\t[up to date]\n\
+*\trefs/tags/v1:refs/tags/v1\t[new tag]\n\
+Done\n";
+
+        let lines = parse_push_porcelain(output);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("refs/heads/main:refs/heads/main"));
+        assert!(lines[0].contains("force-updated"));
+        assert!(lines[1].contains("refs/tags/v1:refs/tags/v1"));
+        assert!(lines[1].contains("will be created"));
     }
 
     #[cfg(unix)]

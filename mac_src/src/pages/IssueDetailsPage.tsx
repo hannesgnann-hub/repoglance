@@ -10,6 +10,7 @@ interface IssueDetailsPageProps {
   onDeletePath: (relativePath: string) => Promise<void>;
   onDeleteFromGitHistory: (relativePath: string) => Promise<void>;
   onForcePush: () => Promise<void>;
+  onPreviewForcePush: () => Promise<string[]>;
   onApplyGitignoreEntries: (entries: string[]) => Promise<void>;
   onRunLongHistoryScan: () => Promise<void>;
 }
@@ -22,6 +23,7 @@ export default function IssueDetailsPage({
   onDeletePath,
   onDeleteFromGitHistory,
   onForcePush,
+  onPreviewForcePush,
   onApplyGitignoreEntries,
   onRunLongHistoryScan
 }: IssueDetailsPageProps) {
@@ -34,6 +36,11 @@ export default function IssueDetailsPage({
   } | null>(null);
   const [hiddenGitDeletedPaths, setHiddenGitDeletedPaths] = useState<Set<string>>(new Set());
   const visibleAffectedPaths = issue.affected_paths.filter((file) => !hiddenGitDeletedPaths.has(file.path));
+  const [pushPreview, setPushPreview] = useState<{
+    loading: boolean;
+    lines: string[];
+    error: string | null;
+  }>({ loading: false, lines: [], error: null });
 
   function fileStateLabel(currentlyExists: boolean) {
     if (issue.category === "gitignore") return "Recommended entry";
@@ -53,6 +60,7 @@ export default function IssueDetailsPage({
 
   function openDeleteOnGitDialog(relativePath: string) {
     setGitDialog({ path: relativePath, step: "ready", error: null });
+    setPushPreview({ loading: false, lines: [], error: null });
   }
 
   async function runDeleteOnGit() {
@@ -62,9 +70,24 @@ export default function IssueDetailsPage({
       await onDeleteFromGitHistory(gitDialog.path);
       setHiddenGitDeletedPaths((paths) => new Set(paths).add(gitDialog.path));
       setGitDialog({ ...gitDialog, step: "deleted", error: null });
+      void loadPushPreview();
     } catch (err) {
       setGitDialog({
         ...gitDialog,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  async function loadPushPreview() {
+    setPushPreview({ loading: true, lines: [], error: null });
+    try {
+      const lines = await onPreviewForcePush();
+      setPushPreview({ loading: false, lines, error: null });
+    } catch (err) {
+      setPushPreview({
+        loading: false,
+        lines: [],
         error: err instanceof Error ? err.message : String(err)
       });
     }
@@ -194,6 +217,30 @@ export default function IssueDetailsPage({
                 <span>Pushes the rewritten history to the remote so future clones shrink.</span>
               </div>
             </div>
+
+            {gitDialog.step !== "ready" ? (
+              <div className="dialogPreview">
+                <strong>What Force Push will change on the remote</strong>
+                {pushPreview.loading ? <p>Checking the remote…</p> : null}
+                {pushPreview.error ? (
+                  <p className="dialogError">
+                    Could not preview remote changes: {pushPreview.error}. You can still force push, but you
+                    will not see what changes beforehand.
+                  </p>
+                ) : null}
+                {!pushPreview.loading && !pushPreview.error ? (
+                  pushPreview.lines.length === 0 ? (
+                    <p>No ref changes detected, or the remote already matches.</p>
+                  ) : (
+                    <ul>
+                      {pushPreview.lines.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  )
+                ) : null}
+              </div>
+            ) : null}
 
             {gitDialog.error ? <div className="dialogError">{gitDialog.error}</div> : null}
 

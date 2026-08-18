@@ -13,6 +13,7 @@ import {
   forcePushRepository,
   getRepositoryDetails,
   listRepositories,
+  previewForcePush,
   removeRepository,
   scanAllRepositories,
   scanRepository
@@ -150,6 +151,7 @@ export default function App() {
               await refreshRepositories();
             }, "Deleting on Git...")
           }
+          onPreviewForcePush={() => previewForcePush(route.repositoryId)}
           onForcePush={() =>
             runAndThrow(async () => {
               await forcePushRepository(route.repositoryId);

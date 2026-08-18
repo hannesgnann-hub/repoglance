@@ -41,6 +41,10 @@ export function forcePushRepository(repositoryId: number) {
   return invoke<void>("force_push_repository", { repositoryId });
 }
 
+export function previewForcePush(repositoryId: number) {
+  return invoke<string[]>("preview_force_push", { repositoryId });
+}
+
 export function applyGitignoreEntries(repositoryId: number, entries: string[]) {
   return invoke<RepositoryDetails>("apply_gitignore_entries", { repositoryId, entries });
 }
