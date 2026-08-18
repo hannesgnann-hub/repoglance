@@ -190,61 +190,7 @@ impl Storage {
 
     fn initialize(&self) -> Result<()> {
         let conn = self.connection()?;
-        conn.execute_batch(
-            "
-            PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS repositories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                added_at TEXT NOT NULL,
-                last_scan_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS scans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL,
-                score INTEGER NOT NULL,
-                score_level TEXT NOT NULL,
-                working_tree_size INTEGER NOT NULL,
-                git_size INTEGER NOT NULL,
-                total_size INTEGER NOT NULL,
-                potential_cleanup INTEGER NOT NULL,
-                security_score INTEGER NOT NULL DEFAULT 100,
-                issue_count INTEGER NOT NULL,
-                score_breakdown TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS issues (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-                category TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                estimated_cleanup INTEGER NOT NULL,
-                detected_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS issue_paths (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-                path TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                currently_exists INTEGER NOT NULL,
-                note TEXT
-            );
-            ",
-        )?;
-        ensure_column(
-            &conn,
-            "scans",
-            "security_score",
-            "INTEGER NOT NULL DEFAULT 100",
-        )?;
-        Ok(())
+        run_migrations(&conn)
     }
 
     fn latest_scan(&self, repository_id: i64) -> Result<Option<ScanSummary>> {
@@ -354,6 +300,89 @@ fn scan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanSummary> {
     })
 }
 
+/// Schema migrations, applied in order. Each entry must be safe to run
+/// against a database that already has the change applied (e.g. an existing
+/// installation that predates this migration list but already has the final
+/// schema), since we cannot know for certain which raw schema state an
+/// on-disk database that was never version-stamped before is in.
+type Migration = fn(&Connection) -> Result<()>;
+
+const MIGRATIONS: &[Migration] = &[migration_v1_initial_schema, migration_v2_add_security_score];
+
+fn run_migrations(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    for (index, migration) in MIGRATIONS.iter().enumerate() {
+        let version = (index + 1) as i64;
+        if version <= current_version {
+            continue;
+        }
+        migration(conn)?;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+
+    Ok(())
+}
+
+fn migration_v1_initial_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS repositories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            added_at TEXT NOT NULL,
+            last_scan_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS scans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            score_level TEXT NOT NULL,
+            working_tree_size INTEGER NOT NULL,
+            git_size INTEGER NOT NULL,
+            total_size INTEGER NOT NULL,
+            potential_cleanup INTEGER NOT NULL,
+            issue_count INTEGER NOT NULL,
+            score_breakdown TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            category TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            estimated_cleanup INTEGER NOT NULL,
+            detected_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_paths (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            path TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            currently_exists INTEGER NOT NULL,
+            note TEXT
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn migration_v2_add_security_score(conn: &Connection) -> Result<()> {
+    ensure_column(
+        conn,
+        "scans",
+        "security_score",
+        "INTEGER NOT NULL DEFAULT 100",
+    )
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -385,5 +414,150 @@ fn score_level_from_str(value: &str) -> ScoreLevel {
         "Good" => ScoreLevel::Good,
         "Needs Attention" => ScoreLevel::NeedsAttention,
         _ => ScoreLevel::Poor,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{IssueCategory, IssueSeverity, NewIssue, NewScan};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "repoglance_test_{name}_{}_{unique}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    struct TempDb(PathBuf);
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn migrations_run_once_and_are_idempotent_on_reopen() {
+        let path = temp_db_path("idempotent");
+        let _guard = TempDb(path.clone());
+
+        let storage = Storage::new(&path).expect("first open creates schema");
+        drop(storage);
+
+        // Reopening an already-migrated database must not error (e.g. by
+        // trying to add a column that is already there).
+        let storage = Storage::new(&path).expect("second open is a no-op migration-wise");
+
+        let conn = storage.connection().unwrap();
+        let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(user_version, MIGRATIONS.len() as i64);
+
+        let mut stmt = conn.prepare("PRAGMA table_info(scans)").unwrap();
+        let has_security_score = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|column| column.map(|name| name == "security_score").unwrap_or(false));
+        assert!(has_security_score, "security_score column should exist");
+    }
+
+    #[test]
+    fn legacy_database_without_security_score_column_gets_migrated() {
+        let path = temp_db_path("legacy");
+        let _guard = TempDb(path.clone());
+
+        // Simulate a database created before the security_score column (and
+        // before this migration list) existed: tables present, but no
+        // PRAGMA user_version ever set (defaults to 0).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE repositories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    added_at TEXT NOT NULL,
+                    last_scan_at TEXT
+                );
+                CREATE TABLE scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    score_level TEXT NOT NULL,
+                    working_tree_size INTEGER NOT NULL,
+                    git_size INTEGER NOT NULL,
+                    total_size INTEGER NOT NULL,
+                    potential_cleanup INTEGER NOT NULL,
+                    issue_count INTEGER NOT NULL,
+                    score_breakdown TEXT NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::new(&path).expect("legacy database should migrate cleanly");
+        let conn = storage.connection().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(scans)").unwrap();
+        let has_security_score = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|column| column.map(|name| name == "security_score").unwrap_or(false));
+        assert!(
+            has_security_score,
+            "legacy database should have security_score added"
+        );
+    }
+
+    #[test]
+    fn save_scan_persists_security_score_and_roundtrips() {
+        let path = temp_db_path("roundtrip");
+        let _guard = TempDb(path.clone());
+        let repo_dir = std::env::temp_dir().join(format!(
+            "repoglance_test_repo_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+
+        let storage = Storage::new(&path).unwrap();
+        let repository = storage.add_repository(&repo_dir).unwrap();
+
+        let scan = NewScan {
+            repository_id: repository.id,
+            created_at: "2024-01-01T00:00:00Z".into(),
+            score: 42,
+            score_level: ScoreLevel::from_score(42),
+            working_tree_size: 1000,
+            git_size: 2000,
+            total_size: 3000,
+            potential_cleanup: 500,
+            security_score: 55,
+            issue_count: 1,
+            score_breakdown: vec![],
+            issues: vec![NewIssue {
+                category: IssueCategory::Security,
+                severity: IssueSeverity::Critical,
+                title: "Possible secrets or sensitive files".into(),
+                description: "desc".into(),
+                affected_paths: vec![],
+                estimated_cleanup_bytes: 0,
+                detected_at: "2024-01-01T00:00:00Z".into(),
+            }],
+        };
+
+        let details = storage.save_scan(scan).unwrap();
+        assert_eq!(details.latest_scan.as_ref().unwrap().security_score, 55);
+
+        let refetched = storage.details(repository.id).unwrap();
+        assert_eq!(refetched.latest_scan.unwrap().security_score, 55);
+
+        let _ = fs::remove_dir_all(&repo_dir);
     }
 }
